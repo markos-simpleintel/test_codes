@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="ISO-8859-1" ?>
-<scenario name="Long DTMF Test Call">
+<scenario name="DTMF Test Call With Delayed Audio">
   <send>
     <![CDATA[
 INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
@@ -46,9 +46,20 @@ Content-Length: 0
 ]]>
   </send>
 
-  <!-- Wait 70 seconds -->
-  <pause milliseconds="70000"/>
+  <!-- Wait 5 seconds after answer -->
+  <pause milliseconds="9000"/>
 
+  <!-- Play first audio -->
+  <nop>
+    <action>
+      <exec rtp_stream="audio1.wav,1,0"/>
+    </action>
+  </nop>
+
+  <!-- Wait 5 seconds after first audio starts -->
+  <pause milliseconds="5000"/>
+
+  <!-- Continue here: second audio, DTMF, or BYE -->
   <send>
     <![CDATA[
 BYE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
