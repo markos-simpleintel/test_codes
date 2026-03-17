@@ -1,14 +1,63 @@
 <?xml version="1.0" encoding="ISO-8859-1" ?>
-<scenario name="DTMF Test Call With Delayed Audio">
+<scenario name="DTMF Test Call With Delayed Audio Auth And RTP Keepalive">
+
+  <!-- First INVITE without auth -->
   <send>
     <![CDATA[
 INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
 Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
-From: "sipp" <sip:sipp@[local_ip]:[local_port]>;tag=[call_number]
+From: "Rahul" <sip:1001@10.29.32.138>;tag=[call_number]
 To: <sip:[service]@[remote_ip]:[remote_port]>
 Call-ID: [call_id]
 CSeq: 1 INVITE
-Contact: <sip:sipp@[local_ip]:[local_port]>
+Contact: <sip:1001@[local_ip]:[local_port]>
+Max-Forwards: 70
+Subject: load test
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=user1 53655765 2353687637 IN IP[local_ip_type] [local_ip]
+s=-
+c=IN IP[media_ip_type] [media_ip]
+t=0 0
+m=audio [media_port] RTP/AVP 0 101
+a=rtpmap:0 PCMU/8000
+a=rtpmap:101 telephone-event/8000
+a=fmtp:101 0-15
+a=ptime:20
+]]>
+  </send>
+
+  <!-- Expect auth challenge -->
+  <recv response="401" auth="true" />
+
+  <!-- ACK the 401 -->
+  <send>
+    <![CDATA[
+ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+From: "Rahul" <sip:1001@10.29.32.138>;tag=[call_number]
+To: <sip:[service]@[remote_ip]:[remote_port]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 1 ACK
+Contact: <sip:1001@[local_ip]:[local_port]>
+Max-Forwards: 70
+Content-Length: 0
+]]>
+  </send>
+
+  <!-- Second INVITE with digest auth -->
+  <send>
+    <![CDATA[
+INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+From: "Rahul" <sip:1001@10.29.32.138>;tag=[call_number]
+To: <sip:[service]@[remote_ip]:[remote_port]>
+Call-ID: [call_id]
+CSeq: 2 INVITE
+Contact: <sip:1001@[local_ip]:[local_port]>
+[authentication username=1001 password=b0f1306769fe67fec2b2e0941e34d962]
 Max-Forwards: 70
 Subject: load test
 Content-Type: application/sdp
@@ -36,39 +85,39 @@ a=ptime:20
     <![CDATA[
 ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
 Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
-From: "sipp" <sip:sipp@[local_ip]:[local_port]>;tag=[call_number]
+From: "Rahul" <sip:1001@10.29.32.138>;tag=[call_number]
 To: <sip:[service]@[remote_ip]:[remote_port]>[peer_tag_param]
 Call-ID: [call_id]
-CSeq: 1 ACK
-Contact: <sip:sipp@[local_ip]:[local_port]>
+CSeq: 2 ACK
+Contact: <sip:1001@[local_ip]:[local_port]>
 Max-Forwards: 70
 Content-Length: 0
 ]]>
   </send>
 
-  <!-- Wait 5 seconds after answer -->
-  <pause milliseconds="9000"/>
+  <!-- Wait until the server greeting is finished -->
+  <!-- Increase this if janev6 is longer -->
+  <pause milliseconds="10000"/>
 
-  <!-- Play first audio -->
+  <!-- Start one long PCMU stream: real speech + long silence -->
   <nop>
     <action>
-      <exec rtp_stream="audio1.wav,1,0"/>
+      <exec rtp_stream="audio2_keepalive.ulaw,1,0"/>
     </action>
   </nop>
 
-  <!-- Wait 5 seconds after first audio starts -->
-  <pause milliseconds="5000"/>
+  <!-- Keep the SIP dialog open while RTP thread is still sending -->
+  <pause milliseconds="200000"/>
 
-  <!-- Continue here: second audio, DTMF, or BYE -->
   <send>
     <![CDATA[
 BYE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
 Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
-From: "sipp" <sip:sipp@[local_ip]:[local_port]>;tag=[call_number]
+From: "Rahul" <sip:1001@10.29.32.138>;tag=[call_number]
 To: <sip:[service]@[remote_ip]:[remote_port]>[peer_tag_param]
 Call-ID: [call_id]
-CSeq: 2 BYE
-Contact: <sip:sipp@[local_ip]:[local_port]>
+CSeq: 3 BYE
+Contact: <sip:1001@[local_ip]:[local_port]>
 Max-Forwards: 70
 Content-Length: 0
 ]]>
