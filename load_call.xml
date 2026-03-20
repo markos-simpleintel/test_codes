@@ -96,18 +96,34 @@ Content-Length: 0
   </send>
 
   <!-- Wait until the server greeting is finished -->
-  <!-- Increase this if janev6 is longer -->
   <pause milliseconds="10000"/>
 
-  <!-- Start one long PCMU stream: real speech + long silence -->
+  <!-- Start first long PCMU stream -->
   <nop>
     <action>
       <exec rtp_stream="audio2_keepalive.ulaw,1,0"/>
     </action>
   </nop>
 
-  <!-- Keep the SIP dialog open while RTP thread is still sending -->
-  <pause milliseconds="200000"/>
+  <!-- After 10 seconds, start the second file -->
+  <pause milliseconds="10000"/>
+
+  <nop>
+    <action>
+      <exec rtp_stream="name_keepalive.ulaw,1,0"/>
+    </action>
+  </nop>
+
+  <pause milliseconds="8000"/>
+
+  <nop>
+    <action>
+      <exec rtp_stream="birthday_keepalive.ulaw,1,0"/>
+    </action>
+  </nop>
+
+  <!-- Keep the SIP dialog open while RTP is still sending -->
+  <pause milliseconds="180000"/>
 
   <send>
     <![CDATA[
