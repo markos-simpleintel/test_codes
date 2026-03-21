@@ -1,6 +1,6 @@
 import time
-import math
 import struct
+import socket
 import threading
 import pjsua2 as pj
 
@@ -9,6 +9,8 @@ import pjsua2 as pj
 # CONFIG
 # =========================
 LOCAL_SIP_PORT = 5062
+REMOTE_SIP_PORT = 5060
+MEDIA_RTP_PORT = 4000
 
 ASTERISK_HOST = "10.29.32.138"
 
@@ -16,13 +18,19 @@ CALLER_USER = "1001"
 CALLER_PASS = "b0f1306769fe67fec2b2e0941e34d962"
 CALLER_DISPLAY = "Rahul"
 
-DEST_URI = "sip:19073750302@10.29.32.138"
+DEST_URI = f"sip:19073750302@{ASTERISK_HOST}:{REMOTE_SIP_PORT}"
 
-# Use the IP address that Asterisk can really reach.
-ADVERTISED_IP = "192.168.220.196"
-
-# Keep UDP first because your SIPp worked with UDP.
+# Keep UDP first so it stays close to your SIPp test.
+# If UDP still fragments after these reductions, flip this to True.
 USE_TCP = False
+
+# Let the code auto-pick the local interface used to reach Asterisk,
+# which is usually closer to how SIPp behaves.
+FORCE_BIND_IP = None
+
+# Usually leave this empty when trying to mimic SIPp.
+# Only set it if you explicitly want a different advertised address.
+FORCE_PUBLIC_IP = None
 
 PLAYLIST = [
     "audio1.wav",
@@ -31,33 +39,210 @@ PLAYLIST = [
     "birthday.wav",
 ]
 
-# Make this file longer than MAX_CALL_SECONDS.
-# Example:
-# ffmpeg -f lavfi -i anullsrc=r=8000:cl=mono -t 300 -c:a pcm_s16le silence_300s.wav
-SILENCE_PAD_WAV = "silence_60s.wav"
+# Make this longer than MAX_CALL_SECONDS
+SILENCE_PAD_WAV = "silence_300s.wav"
 
 REMOTE_RECORDING = "remote.wav"
 MIXED_RECORDING = "mixed.wav"
 
 MAX_CALL_SECONDS = 180
 
-# Remote-turn detector
-# A turn is considered finished after:
-# 1) remote speech/noise is detected above threshold
-# 2) then silence continues for this long
 SILENCE_AFTER_VOICE_MS = 2000
 POLL_MS = 100
-
-# Frame-energy VAD threshold.
-# You may need to tune this.
-# Typical useful starting values: 150 to 800
 VOICE_ENERGY_THRESHOLD = 300.0
-
-# Fallback:
-# If no remote voice is detected at all for this many seconds,
-# force the next local playback so the call does not stall forever.
 INITIAL_WAIT_TIMEOUT_SECS = 28
 NEXT_TURN_WAIT_TIMEOUT_SECS = 15
+MAX_REMOTE_TURN_SECS = 12
+
+
+# =========================
+# HELPERS
+# =========================
+def safe_set(obj, attr, value):
+    if not hasattr(obj, attr):
+        return False
+    try:
+        setattr(obj, attr, value)
+        return True
+    except Exception as e:
+        print(f"*** could not set {obj.__class__.__name__}.{attr}: {e}")
+        return False
+
+
+def detect_local_ip_for_remote(remote_host: str, remote_port: int) -> str:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect((remote_host, remote_port))
+        return s.getsockname()[0]
+    finally:
+        s.close()
+
+
+def get_bind_ip() -> str:
+    if FORCE_BIND_IP:
+        return FORCE_BIND_IP
+    return detect_local_ip_for_remote(ASTERISK_HOST, REMOTE_SIP_PORT)
+
+
+def print_transport_info(ep: pj.Endpoint, transport_id: int):
+    try:
+        info = ep.transportGetInfo(transport_id)
+        print(f"*** transport type: {info.typeName}")
+        print(f"*** transport localAddress: {info.localAddress.host}:{info.localAddress.port}")
+        print(f"*** transport localName: {info.localName.host}:{info.localName.port}")
+        print(f"*** transport info: {info.info}")
+    except Exception as e:
+        print(f"*** could not fetch transport info: {e}")
+
+
+def configure_codecs(ep: pj.Endpoint):
+    """
+    Keep only PCMU active so the SDP is as small/simple as possible.
+    """
+    try:
+        codec_infos = ep.codecEnum2()
+    except Exception as e:
+        print(f"*** codec enumeration failed: {e}")
+        return
+
+    keep_prefixes = ("PCMU/8000",)
+
+    print("*** codec list before priority update:")
+    for c in codec_infos:
+        print(f"    {c.codecId}")
+
+    for c in codec_infos:
+        codec_id = c.codecId
+        prio = 0
+        if any(codec_id.startswith(prefix) for prefix in keep_prefixes):
+            prio = 255
+
+        try:
+            ep.codecSetPriority(codec_id, prio)
+        except Exception as e:
+            print(f"*** failed to set codec priority for {codec_id}: {e}")
+
+    print("*** codec priority update done")
+
+
+def make_transport(ep: pj.Endpoint, bind_ip: str) -> int:
+    tp_cfg = pj.TransportConfig()
+    tp_cfg.port = LOCAL_SIP_PORT
+
+    # Bind to the exact interface we are actually using to reach Asterisk.
+    safe_set(tp_cfg, "boundAddress", bind_ip)
+
+    # Only publish a different address if explicitly forced.
+    if FORCE_PUBLIC_IP:
+        safe_set(tp_cfg, "publicAddress", FORCE_PUBLIC_IP)
+        print(f"*** forcing public SIP address: {FORCE_PUBLIC_IP}")
+    else:
+        print("*** no public SIP address override")
+
+    if USE_TCP:
+        tp_type = pj.PJSIP_TRANSPORT_TCP
+        print("*** using TCP transport")
+    else:
+        tp_type = pj.PJSIP_TRANSPORT_UDP
+        print("*** using UDP transport")
+
+    transport_id = ep.transportCreate(tp_type, tp_cfg)
+    return transport_id
+
+
+def configure_endpoint(ep_cfg: pj.EpConfig):
+    # Logging
+    ep_cfg.logConfig.level = 5
+    ep_cfg.logConfig.consoleLevel = 5
+
+    # Keep UA side minimal
+    safe_set(ep_cfg.uaConfig, "userAgent", "")
+    safe_set(ep_cfg.uaConfig, "natTypeInSdp", 0)
+    safe_set(ep_cfg.uaConfig, "enableUpnp", False)
+
+    # Media defaults
+    ep_cfg.medConfig.clockRate = 8000
+    ep_cfg.medConfig.channelCount = 1
+    ep_cfg.medConfig.sndClockRate = 8000
+    ep_cfg.medConfig.quality = 4
+    ep_cfg.medConfig.noVad = True
+    ep_cfg.medConfig.sndAutoCloseTime = -1
+
+
+def build_account_config(bind_ip: str, transport_id: int) -> pj.AccountConfig:
+    acfg = pj.AccountConfig()
+
+    # SIPp-like From identity
+    acfg.idUri = f'"{CALLER_DISPLAY}" <sip:{CALLER_USER}@{ASTERISK_HOST}>'
+
+    # Do not REGISTER
+    acfg.regConfig.registerOnAdd = False
+
+    # Use only the chosen transport
+    safe_set(acfg.sipConfig, "transportId", transport_id)
+
+    # Credentials for 401 on INVITE
+    acfg.sipConfig.authCreds.append(
+        pj.AuthCredInfo("digest", "*", CALLER_USER, 0, CALLER_PASS)
+    )
+
+    # Keep auth flow like SIPp: initial INVITE without Authorization
+    safe_set(acfg.sipConfig, "authInitialEmpty", False)
+    safe_set(acfg.sipConfig, "useSharedAuth", False)
+
+    # Force a simple Contact and avoid extra Contact decorations
+    safe_set(acfg.sipConfig, "contactForced", f"sip:{CALLER_USER}@{bind_ip}:{LOCAL_SIP_PORT}")
+    safe_set(acfg.sipConfig, "contactParams", "")
+    safe_set(acfg.sipConfig, "contactUriParams", "")
+
+    # Minimize account call feature headers
+    safe_set(acfg.callConfig, "prackUse", pj.PJSUA_100REL_NOT_USED)
+    safe_set(acfg.callConfig, "timerUse", pj.PJSUA_SIP_TIMER_INACTIVE)
+
+    # Minimize NAT/account-side rewriting behaviors
+    safe_set(acfg.natConfig, "contactRewriteUse", 0)
+    safe_set(acfg.natConfig, "viaRewriteUse", 0)
+    safe_set(acfg.natConfig, "sdpNatRewriteUse", 0)
+    safe_set(acfg.natConfig, "sipOutboundUse", 0)
+    safe_set(acfg.natConfig, "contactUseSrcPort", 0)
+    safe_set(acfg.natConfig, "udpKaIntervalSec", 0)
+
+    safe_set(acfg.natConfig, "iceEnabled", False)
+    safe_set(acfg.natConfig, "turnEnabled", False)
+    safe_set(acfg.natConfig, "iceNoRtcp", True)
+    safe_set(acfg.natConfig, "iceAlwaysUpdate", False)
+
+    # Media transport bound to same interface as SIP
+    safe_set(acfg.mediaConfig.transportConfig, "port", MEDIA_RTP_PORT)
+    safe_set(acfg.mediaConfig.transportConfig, "portRange", 0)
+    safe_set(acfg.mediaConfig.transportConfig, "boundAddress", bind_ip)
+
+    # Keep SDP/media small
+    safe_set(acfg.mediaConfig, "lockCodecEnabled", False)
+    safe_set(acfg.mediaConfig, "streamKaEnabled", False)
+    safe_set(acfg.mediaConfig, "rtcpXrEnabled", False)
+    safe_set(acfg.mediaConfig, "rtcpMuxEnabled", False)
+
+    # Try to stay on RTP/AVP-style behavior
+    try:
+        safe_set(acfg.mediaConfig.rtcpFbConfig, "dontUseAvpf", True)
+    except Exception:
+        pass
+
+    return acfg
+
+
+def is_active_audio_media(media_desc) -> bool:
+    if media_desc.type != pj.PJMEDIA_TYPE_AUDIO:
+        return False
+
+    status = getattr(media_desc, "status", None)
+    active_const = getattr(pj, "PJSUA_CALL_MEDIA_ACTIVE", None)
+
+    if status is not None and active_const is not None and status != active_const:
+        return False
+
+    return True
 
 
 # =========================
@@ -82,7 +267,6 @@ class FilePlayer(pj.AudioMediaPlayer):
         self.createPlayer(self.wav_path)
         self.startTransmit(call_audio)
 
-        # Also send local playback into the mixed recorder
         if self.owner.mixed_recorder is not None:
             try:
                 self.startTransmit(self.owner.mixed_recorder)
@@ -136,7 +320,10 @@ class RemoteTap(pj.AudioMediaPort):
                 return
 
             samples = struct.unpack("<" + ("h" * sample_count), pcm[: sample_count * 2])
-            energy = math.sqrt(sum(s * s for s in samples) / sample_count)
+
+            # Lighter than RMS in every 20 ms callback
+            peak = max(abs(s) for s in samples) if samples else 0
+            energy = float(peak)
 
             now = time.time()
             with self.owner._lock:
@@ -179,7 +366,6 @@ class MyCall(pj.Call):
         self._wait_thread = None
         self._waiting_for_remote = False
 
-        # Real remote-audio VAD state
         self.voice_energy_threshold = VOICE_ENERGY_THRESHOLD
         self.remote_seen_voice = False
         self.last_voice_ts = 0.0
@@ -212,7 +398,7 @@ class MyCall(pj.Call):
         ci = self.getInfo()
 
         for i, m in enumerate(ci.media):
-            if m.type != pj.PJMEDIA_TYPE_AUDIO:
+            if not is_active_audio_media(m):
                 continue
 
             try:
@@ -254,10 +440,7 @@ class MyCall(pj.Call):
             except pj.Error as e:
                 print(f"*** remote tap setup failed: {e}")
 
-            # Start outbound silence immediately so Asterisk receives RTP.
             self.start_rtp_keepalive()
-
-            # Initial wait for remote greeting/IVR turn to finish
             self.start_wait_thread(
                 timeout_secs=INITIAL_WAIT_TIMEOUT_SECS,
                 label="initial-remote-turn",
@@ -337,6 +520,13 @@ class MyCall(pj.Call):
                     print(f"*** frame energy ({label}): {energy:.1f}")
                     last_log_at = now
 
+                if now - started >= MAX_REMOTE_TURN_SECS:
+                    print(f"*** max remote turn wait reached ({label}), forcing playback")
+                    with self._lock:
+                        self._waiting_for_remote = False
+                    self.start_next_file()
+                    return
+
                 if seen_voice and last_voice_ts > 0:
                     silent_for_ms = (now - last_voice_ts) * 1000.0
                     if silent_for_ms >= SILENCE_AFTER_VOICE_MS:
@@ -363,7 +553,6 @@ class MyCall(pj.Call):
             if self.disconnected or not self.call_audio:
                 return
 
-        # Stop silence before sending a real prompt
         self.stop_rtp_keepalive()
 
         with self._lock:
@@ -407,7 +596,6 @@ class MyCall(pj.Call):
     def start(self):
         prm = pj.CallOpParam(True)
 
-        # Make media offer simple
         prm.opt.audioCount = 1
         prm.opt.videoCount = 0
         prm.opt.textCount = 0
@@ -425,62 +613,6 @@ class MyCall(pj.Call):
 
 
 # =========================
-# HELPERS
-# =========================
-def configure_codecs(ep: pj.Endpoint):
-    """
-    Reduce SDP size to be closer to SIPp.
-    Keep only PCMU/8000 active.
-    """
-    try:
-        codec_infos = ep.codecEnum2()
-    except Exception as e:
-        print(f"*** codec enumeration failed: {e}")
-        return
-
-    keep_prefixes = (
-        "PCMU/8000",
-    )
-
-    print("*** codec list before priority update:")
-    for c in codec_infos:
-        print(f"    {c.codecId}")
-
-    for c in codec_infos:
-        codec_id = c.codecId
-        prio = 0
-        for prefix in keep_prefixes:
-            if codec_id.startswith(prefix):
-                prio = 255
-                break
-
-        try:
-            ep.codecSetPriority(codec_id, prio)
-        except Exception as e:
-            print(f"*** failed to set codec priority for {codec_id}: {e}")
-
-    print("*** codec priority update done")
-
-
-def make_transport(ep: pj.Endpoint):
-    tp_cfg = pj.TransportConfig()
-    tp_cfg.port = LOCAL_SIP_PORT
-
-    if ADVERTISED_IP:
-        tp_cfg.publicAddress = ADVERTISED_IP
-        print(f"*** advertising SIP transport address: {ADVERTISED_IP}")
-
-    if USE_TCP:
-        tp_type = pj.PJSIP_TRANSPORT_TCP
-        print("*** using TCP transport")
-    else:
-        tp_type = pj.PJSIP_TRANSPORT_UDP
-        print("*** using UDP transport")
-
-    ep.transportCreate(tp_type, tp_cfg)
-
-
-# =========================
 # MAIN
 # =========================
 def main():
@@ -489,44 +621,25 @@ def main():
     call = None
 
     try:
+        bind_ip = get_bind_ip()
+        print(f"*** chosen local bind IP: {bind_ip}")
+
         ep_cfg = pj.EpConfig()
-
-        # Logging
-        ep_cfg.logConfig.level = 5
-        ep_cfg.logConfig.consoleLevel = 5
-
-        # Media behavior
-        ep_cfg.medConfig.clockRate = 8000
-        ep_cfg.medConfig.channelCount = 1
-        ep_cfg.medConfig.sndClockRate = 8000
-        ep_cfg.medConfig.quality = 4
-        ep_cfg.medConfig.noVad = True
-        ep_cfg.medConfig.sndAutoCloseTime = -1
+        configure_endpoint(ep_cfg)
 
         ep.libCreate()
         ep.libInit(ep_cfg)
 
-        # Null device gives timing to the conference bridge
         ep.audDevManager().setNullDev()
 
-        make_transport(ep)
+        transport_id = make_transport(ep, bind_ip)
         ep.libStart()
         print("*** PJSUA2 STARTED ***")
 
+        print_transport_info(ep, transport_id)
         configure_codecs(ep)
 
-        acfg = pj.AccountConfig()
-
-        # SIPp-like identity
-        acfg.idUri = f'"{CALLER_DISPLAY}" <sip:{CALLER_USER}@{ASTERISK_HOST}>'
-
-        # Do not REGISTER
-        acfg.regConfig.registerOnAdd = False
-
-        # Credentials for 401 challenge on INVITE
-        acfg.sipConfig.authCreds.append(
-            pj.AuthCredInfo("digest", "*", CALLER_USER, 0, CALLER_PASS)
-        )
+        acfg = build_account_config(bind_ip, transport_id)
 
         acc = MyAccount()
         acc.create(acfg)
