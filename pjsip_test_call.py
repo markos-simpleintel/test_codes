@@ -1,4 +1,6 @@
 import time
+import math
+import struct
 import threading
 import pjsua2 as pj
 
@@ -43,9 +45,13 @@ MAX_CALL_SECONDS = 180
 # A turn is considered finished after:
 # 1) remote speech/noise is detected above threshold
 # 2) then silence continues for this long
-RX_THRESHOLD = 0
 SILENCE_AFTER_VOICE_MS = 2000
 POLL_MS = 100
+
+# Frame-energy VAD threshold.
+# You may need to tune this.
+# Typical useful starting values: 150 to 800
+VOICE_ENERGY_THRESHOLD = 300.0
 
 # Fallback:
 # If no remote voice is detected at all for this many seconds,
@@ -89,6 +95,61 @@ class FilePlayer(pj.AudioMediaPlayer):
 
 
 # =========================
+# REMOTE AUDIO TAP
+# =========================
+class RemoteTap(pj.AudioMediaPort):
+    def __init__(self, owner):
+        super().__init__()
+        self.owner = owner
+
+    def create(self):
+        fmt = pj.MediaFormatAudio()
+        try:
+            fmt.type = pj.PJMEDIA_TYPE_AUDIO
+        except Exception:
+            pass
+        fmt.clockRate = 8000
+        fmt.channelCount = 1
+        fmt.bitsPerSample = 16
+        fmt.frameTimeUsec = 20000
+        self.createPort("remote-tap", fmt)
+
+    def onFrameReceived(self, frame):
+        try:
+            buf = frame.buf
+            if buf is None:
+                return
+
+            try:
+                pcm = bytes(buf)
+            except Exception:
+                try:
+                    pcm = bytes(bytearray(buf))
+                except Exception:
+                    return
+
+            if not pcm:
+                return
+
+            sample_count = len(pcm) // 2
+            if sample_count <= 0:
+                return
+
+            samples = struct.unpack("<" + ("h" * sample_count), pcm[: sample_count * 2])
+            energy = math.sqrt(sum(s * s for s in samples) / sample_count)
+
+            now = time.time()
+            with self.owner._lock:
+                self.owner.last_frame_energy = energy
+                if energy >= self.owner.voice_energy_threshold:
+                    self.owner.remote_seen_voice = True
+                    self.owner.last_voice_ts = now
+
+        except Exception as e:
+            print(f"*** remote tap frame error: {e}")
+
+
+# =========================
 # CALL
 # =========================
 class MyCall(pj.Call):
@@ -106,6 +167,7 @@ class MyCall(pj.Call):
         self.mixed_recorder = None
         self.player = None
         self.keepalive_player = None
+        self.remote_tap = None
 
         self.play_idx = 0
         self.media_ready = False
@@ -116,6 +178,12 @@ class MyCall(pj.Call):
         self._lock = threading.Lock()
         self._wait_thread = None
         self._waiting_for_remote = False
+
+        # Real remote-audio VAD state
+        self.voice_energy_threshold = VOICE_ENERGY_THRESHOLD
+        self.remote_seen_voice = False
+        self.last_voice_ts = 0.0
+        self.last_frame_energy = 0.0
 
     def onCallState(self, prm):
         ci = self.getInfo()
@@ -137,6 +205,7 @@ class MyCall(pj.Call):
                 self.player = None
                 self.recorder = None
                 self.mixed_recorder = None
+                self.remote_tap = None
                 self._waiting_for_remote = False
 
     def onCallMediaState(self, prm):
@@ -175,6 +244,15 @@ class MyCall(pj.Call):
                     print(f"*** mixed recording started: {self.mixed_recording}")
             except pj.Error as e:
                 print(f"*** mixed recorder setup failed: {e}")
+
+            try:
+                if self.remote_tap is None:
+                    self.remote_tap = RemoteTap(self)
+                    self.remote_tap.create()
+                    self.call_audio.startTransmit(self.remote_tap)
+                    print("*** remote tap started")
+            except pj.Error as e:
+                print(f"*** remote tap setup failed: {e}")
 
             # Start outbound silence immediately so Asterisk receives RTP.
             self.start_rtp_keepalive()
@@ -224,6 +302,9 @@ class MyCall(pj.Call):
             if self._waiting_for_remote:
                 return
             self._waiting_for_remote = True
+            self.remote_seen_voice = False
+            self.last_voice_ts = 0.0
+            self.last_frame_energy = 0.0
 
         t = threading.Thread(
             target=self.wait_for_remote_turn_end,
@@ -240,50 +321,32 @@ class MyCall(pj.Call):
         except pj.Error as e:
             print(f"*** libRegisterThread warning ({label}): {e}")
 
-        seen_voice = False
-        silent_ms = 0
         started = time.time()
-        last_rx_log_at = 0.0
+        last_log_at = 0.0
 
         try:
             while not self._stop_evt.is_set():
-                with self._lock:
-                    call_audio = self.call_audio
-
-                if not call_audio:
-                    time.sleep(0.1)
-                    continue
-
-                try:
-                    rx = call_audio.getRxLevel()
-                except pj.Error as e:
-                    print(f"*** getRxLevel failed ({label}): {e}")
-                    time.sleep(0.1)
-                    continue
-
-                # Light debug logging so the console does not flood too hard
                 now = time.time()
-                if now - last_rx_log_at >= 1.0:
-                    print(f"*** rx level ({label}): {rx}")
-                    last_rx_log_at = now
 
-                if rx > RX_THRESHOLD:
-                    if not seen_voice:
-                        print(f"*** remote audio detected ({label})")
-                    seen_voice = True
-                    silent_ms = 0
-                else:
-                    if seen_voice:
-                        silent_ms += POLL_MS
+                with self._lock:
+                    seen_voice = self.remote_seen_voice
+                    last_voice_ts = self.last_voice_ts
+                    energy = self.last_frame_energy
 
-                if seen_voice and silent_ms >= SILENCE_AFTER_VOICE_MS:
-                    print(f"*** remote turn seems finished ({label})")
-                    with self._lock:
-                        self._waiting_for_remote = False
-                    self.start_next_file()
-                    return
+                if now - last_log_at >= 1.0:
+                    print(f"*** frame energy ({label}): {energy:.1f}")
+                    last_log_at = now
 
-                if (not seen_voice) and (time.time() - started >= timeout_secs):
+                if seen_voice and last_voice_ts > 0:
+                    silent_for_ms = (now - last_voice_ts) * 1000.0
+                    if silent_for_ms >= SILENCE_AFTER_VOICE_MS:
+                        print(f"*** remote turn seems finished ({label})")
+                        with self._lock:
+                            self._waiting_for_remote = False
+                        self.start_next_file()
+                        return
+
+                if (not seen_voice) and (now - started >= timeout_secs):
                     print(f"*** no remote voice detected, forcing playback ({label})")
                     with self._lock:
                         self._waiting_for_remote = False
