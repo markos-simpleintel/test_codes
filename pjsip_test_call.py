@@ -47,7 +47,18 @@ MIXED_RECORDING = "mixed.wav"
 
 MAX_CALL_SECONDS = 180
 
-SILENCE_AFTER_VOICE_MS = 2000
+# Old:
+# SILENCE_AFTER_VOICE_MS = 2000
+
+# New:
+# Remote audio must be active for at least this long before we treat it
+# as a real prompt.
+MIN_REMOTE_PROMPT_MS = 1000
+
+# Once the prompt has been active long enough, this much silence means
+# the prompt ended and Asterisk is likely recording now.
+END_OF_PROMPT_SILENCE_MS = 1000
+
 POLL_MS = 100
 VOICE_ENERGY_THRESHOLD = 300.0
 INITIAL_WAIT_TIMEOUT_SECS = 28
@@ -328,9 +339,18 @@ class RemoteTap(pj.AudioMediaPort):
             now = time.time()
             with self.owner._lock:
                 self.owner.last_frame_energy = energy
+
                 if energy >= self.owner.voice_energy_threshold:
                     self.owner.remote_seen_voice = True
                     self.owner.last_voice_ts = now
+                    self.owner.remote_last_above_thresh_ts = now
+
+                    if self.owner.remote_voice_started_ts == 0.0:
+                        self.owner.remote_voice_started_ts = now
+
+                    active_ms = (now - self.owner.remote_voice_started_ts) * 1000.0
+                    if active_ms >= MIN_REMOTE_PROMPT_MS:
+                        self.owner.remote_prompt_armed = True
 
         except Exception as e:
             print(f"*** remote tap frame error: {e}")
@@ -370,6 +390,11 @@ class MyCall(pj.Call):
         self.remote_seen_voice = False
         self.last_voice_ts = 0.0
         self.last_frame_energy = 0.0
+
+        # New prompt-end state
+        self.remote_voice_started_ts = 0.0
+        self.remote_last_above_thresh_ts = 0.0
+        self.remote_prompt_armed = False
 
     def onCallState(self, prm):
         ci = self.getInfo()
@@ -488,6 +513,9 @@ class MyCall(pj.Call):
             self.remote_seen_voice = False
             self.last_voice_ts = 0.0
             self.last_frame_energy = 0.0
+            self.remote_voice_started_ts = 0.0
+            self.remote_last_above_thresh_ts = 0.0
+            self.remote_prompt_armed = False
 
         t = threading.Thread(
             target=self.wait_for_remote_turn_end,
@@ -513,8 +541,9 @@ class MyCall(pj.Call):
 
                 with self._lock:
                     seen_voice = self.remote_seen_voice
-                    last_voice_ts = self.last_voice_ts
                     energy = self.last_frame_energy
+                    last_above = self.remote_last_above_thresh_ts
+                    prompt_armed = self.remote_prompt_armed
 
                 if now - last_log_at >= 1.0:
                     print(f"*** frame energy ({label}): {energy:.1f}")
@@ -527,10 +556,10 @@ class MyCall(pj.Call):
                     self.start_next_file()
                     return
 
-                if seen_voice and last_voice_ts > 0:
-                    silent_for_ms = (now - last_voice_ts) * 1000.0
-                    if silent_for_ms >= SILENCE_AFTER_VOICE_MS:
-                        print(f"*** remote turn seems finished ({label})")
+                if prompt_armed and last_above > 0:
+                    silent_for_ms = (now - last_above) * 1000.0
+                    if silent_for_ms >= END_OF_PROMPT_SILENCE_MS:
+                        print(f"*** remote prompt ended ({label})")
                         with self._lock:
                             self._waiting_for_remote = False
                         self.start_next_file()
@@ -538,6 +567,13 @@ class MyCall(pj.Call):
 
                 if (not seen_voice) and (now - started >= timeout_secs):
                     print(f"*** no remote voice detected, forcing playback ({label})")
+                    with self._lock:
+                        self._waiting_for_remote = False
+                    self.start_next_file()
+                    return
+
+                if (not prompt_armed) and seen_voice and (now - started >= timeout_secs):
+                    print(f"*** remote voice seen but prompt did not fully arm, forcing playback ({label})")
                     with self._lock:
                         self._waiting_for_remote = False
                     self.start_next_file()
