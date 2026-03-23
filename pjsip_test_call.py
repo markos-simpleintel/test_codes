@@ -1,4 +1,5 @@
 import time
+import math
 import struct
 import socket
 import threading
@@ -21,15 +22,12 @@ CALLER_DISPLAY = "Rahul"
 DEST_URI = f"sip:19073750302@{ASTERISK_HOST}:{REMOTE_SIP_PORT}"
 
 # Keep UDP first so it stays close to your SIPp test.
-# If UDP still fragments after these reductions, flip this to True.
 USE_TCP = False
 
-# Let the code auto-pick the local interface used to reach Asterisk,
-# which is usually closer to how SIPp behaves.
+# Let the code auto-pick the local interface used to reach Asterisk.
 FORCE_BIND_IP = None
 
-# Usually leave this empty when trying to mimic SIPp.
-# Only set it if you explicitly want a different advertised address.
+# Usually leave this empty. Only set it if you explicitly want a different advertised address.
 FORCE_PUBLIC_IP = None
 
 PLAYLIST = [
@@ -39,31 +37,29 @@ PLAYLIST = [
     "birthday.wav",
 ]
 
-# Make this longer than MAX_CALL_SECONDS
-SILENCE_PAD_WAV = "silence_300s.wav"
+# Keep this as whatever file you already have.
+# If your calls are long, you can switch to a longer silence file later.
+SILENCE_PAD_WAV = "silence_60s.wav"
 
 REMOTE_RECORDING = "remote.wav"
 MIXED_RECORDING = "mixed.wav"
 
 MAX_CALL_SECONDS = 180
 
-# Old:
-# SILENCE_AFTER_VOICE_MS = 2000
-
-# New:
-# Remote audio must be active for at least this long before we treat it
-# as a real prompt.
-MIN_REMOTE_PROMPT_MS = 1000
-
-# Once the prompt has been active long enough, this much silence means
-# the prompt ended and Asterisk is likely recording now.
-END_OF_PROMPT_SILENCE_MS = 1000
-
+# Old working silence behavior
+SILENCE_AFTER_VOICE_MS = 1000
 POLL_MS = 100
+
+# After the first local answer, cap the total silence budget from the
+# last remote voice frame so we speak before Asterisk Record() times out.
+POST_REDIRECT_TOTAL_SILENCE_MS = 2200
+
+# Frame-energy VAD threshold
 VOICE_ENERGY_THRESHOLD = 300.0
+
+# Fallback timeouts
 INITIAL_WAIT_TIMEOUT_SECS = 28
 NEXT_TURN_WAIT_TIMEOUT_SECS = 15
-MAX_REMOTE_TURN_SECS = 12
 
 
 # =========================
@@ -140,10 +136,9 @@ def make_transport(ep: pj.Endpoint, bind_ip: str) -> int:
     tp_cfg = pj.TransportConfig()
     tp_cfg.port = LOCAL_SIP_PORT
 
-    # Bind to the exact interface we are actually using to reach Asterisk.
+    # Bind to the exact interface we are actually using to reach Asterisk
     safe_set(tp_cfg, "boundAddress", bind_ip)
 
-    # Only publish a different address if explicitly forced.
     if FORCE_PUBLIC_IP:
         safe_set(tp_cfg, "publicAddress", FORCE_PUBLIC_IP)
         print(f"*** forcing public SIP address: {FORCE_PUBLIC_IP}")
@@ -197,7 +192,7 @@ def build_account_config(bind_ip: str, transport_id: int) -> pj.AccountConfig:
         pj.AuthCredInfo("digest", "*", CALLER_USER, 0, CALLER_PASS)
     )
 
-    # Keep auth flow like SIPp: initial INVITE without Authorization
+    # Keep auth flow like SIPp
     safe_set(acfg.sipConfig, "authInitialEmpty", False)
     safe_set(acfg.sipConfig, "useSharedAuth", False)
 
@@ -206,11 +201,11 @@ def build_account_config(bind_ip: str, transport_id: int) -> pj.AccountConfig:
     safe_set(acfg.sipConfig, "contactParams", "")
     safe_set(acfg.sipConfig, "contactUriParams", "")
 
-    # Minimize account call feature headers
+    # Minimize feature headers
     safe_set(acfg.callConfig, "prackUse", pj.PJSUA_100REL_NOT_USED)
     safe_set(acfg.callConfig, "timerUse", pj.PJSUA_SIP_TIMER_INACTIVE)
 
-    # Minimize NAT/account-side rewriting behaviors
+    # Minimize NAT/account-side rewriting
     safe_set(acfg.natConfig, "contactRewriteUse", 0)
     safe_set(acfg.natConfig, "viaRewriteUse", 0)
     safe_set(acfg.natConfig, "sdpNatRewriteUse", 0)
@@ -234,7 +229,6 @@ def build_account_config(bind_ip: str, transport_id: int) -> pj.AccountConfig:
     safe_set(acfg.mediaConfig, "rtcpXrEnabled", False)
     safe_set(acfg.mediaConfig, "rtcpMuxEnabled", False)
 
-    # Try to stay on RTP/AVP-style behavior
     try:
         safe_set(acfg.mediaConfig.rtcpFbConfig, "dontUseAvpf", True)
     except Exception:
@@ -331,26 +325,14 @@ class RemoteTap(pj.AudioMediaPort):
                 return
 
             samples = struct.unpack("<" + ("h" * sample_count), pcm[: sample_count * 2])
-
-            # Lighter than RMS in every 20 ms callback
-            peak = max(abs(s) for s in samples) if samples else 0
-            energy = float(peak)
+            energy = math.sqrt(sum(s * s for s in samples) / sample_count)
 
             now = time.time()
             with self.owner._lock:
                 self.owner.last_frame_energy = energy
-
                 if energy >= self.owner.voice_energy_threshold:
                     self.owner.remote_seen_voice = True
                     self.owner.last_voice_ts = now
-                    self.owner.remote_last_above_thresh_ts = now
-
-                    if self.owner.remote_voice_started_ts == 0.0:
-                        self.owner.remote_voice_started_ts = now
-
-                    active_ms = (now - self.owner.remote_voice_started_ts) * 1000.0
-                    if active_ms >= MIN_REMOTE_PROMPT_MS:
-                        self.owner.remote_prompt_armed = True
 
         except Exception as e:
             print(f"*** remote tap frame error: {e}")
@@ -386,15 +368,15 @@ class MyCall(pj.Call):
         self._wait_thread = None
         self._waiting_for_remote = False
 
+        # Real remote-audio VAD state
         self.voice_energy_threshold = VOICE_ENERGY_THRESHOLD
         self.remote_seen_voice = False
         self.last_voice_ts = 0.0
         self.last_frame_energy = 0.0
 
-        # New prompt-end state
-        self.remote_voice_started_ts = 0.0
-        self.remote_last_above_thresh_ts = 0.0
-        self.remote_prompt_armed = False
+        # Wait-mode flags
+        self.current_wait_requires_prompt_start = False
+        self.current_wait_merge_bridge_gap = False
 
     def onCallState(self, prm):
         ci = self.getInfo()
@@ -418,6 +400,8 @@ class MyCall(pj.Call):
                 self.mixed_recorder = None
                 self.remote_tap = None
                 self._waiting_for_remote = False
+                self.current_wait_requires_prompt_start = False
+                self.current_wait_merge_bridge_gap = False
 
     def onCallMediaState(self, prm):
         ci = self.getInfo()
@@ -465,10 +449,16 @@ class MyCall(pj.Call):
             except pj.Error as e:
                 print(f"*** remote tap setup failed: {e}")
 
+            # Start outbound silence immediately so Asterisk receives RTP.
             self.start_rtp_keepalive()
+
+            # First turn only:
+            # ignore silence until we've heard real remote audio once.
             self.start_wait_thread(
                 timeout_secs=INITIAL_WAIT_TIMEOUT_SECS,
                 label="initial-remote-turn",
+                require_prompt_start=True,
+                merge_bridge_gap=False,
             )
             break
 
@@ -503,7 +493,7 @@ class MyCall(pj.Call):
             except pj.Error as e:
                 print(f"*** failed to stop RTP keepalive silence: {e}")
 
-    def start_wait_thread(self, timeout_secs, label):
+    def start_wait_thread(self, timeout_secs, label, require_prompt_start=False, merge_bridge_gap=False):
         with self._lock:
             if self.disconnected or not self.call_audio:
                 return
@@ -513,9 +503,8 @@ class MyCall(pj.Call):
             self.remote_seen_voice = False
             self.last_voice_ts = 0.0
             self.last_frame_energy = 0.0
-            self.remote_voice_started_ts = 0.0
-            self.remote_last_above_thresh_ts = 0.0
-            self.remote_prompt_armed = False
+            self.current_wait_requires_prompt_start = require_prompt_start
+            self.current_wait_merge_bridge_gap = merge_bridge_gap
 
         t = threading.Thread(
             target=self.wait_for_remote_turn_end,
@@ -541,41 +530,82 @@ class MyCall(pj.Call):
 
                 with self._lock:
                     seen_voice = self.remote_seen_voice
+                    last_voice_ts = self.last_voice_ts
                     energy = self.last_frame_energy
-                    last_above = self.remote_last_above_thresh_ts
-                    prompt_armed = self.remote_prompt_armed
+                    require_prompt_start = self.current_wait_requires_prompt_start
+                    merge_bridge_gap = self.current_wait_merge_bridge_gap
 
                 if now - last_log_at >= 1.0:
-                    print(f"*** frame energy ({label}): {energy:.1f}")
+                    print(
+                        f"*** frame energy ({label}): {energy:.1f} | "
+                        f"seen_voice={seen_voice} | "
+                        f"require_prompt_start={require_prompt_start} | "
+                        f"merge_bridge_gap={merge_bridge_gap}"
+                    )
                     last_log_at = now
 
-                if now - started >= MAX_REMOTE_TURN_SECS:
-                    print(f"*** max remote turn wait reached ({label}), forcing playback")
-                    with self._lock:
-                        self._waiting_for_remote = False
-                    self.start_next_file()
-                    return
-
-                if prompt_armed and last_above > 0:
-                    silent_for_ms = (now - last_above) * 1000.0
-                    if silent_for_ms >= END_OF_PROMPT_SILENCE_MS:
-                        print(f"*** remote prompt ended ({label})")
+                # First turn only:
+                # ignore silence until at least one real remote voice frame is heard.
+                if require_prompt_start and not seen_voice:
+                    if now - started >= timeout_secs:
+                        print(f"*** first turn heard no remote voice, forcing playback ({label})")
                         with self._lock:
                             self._waiting_for_remote = False
+                            self.current_wait_requires_prompt_start = False
+                            self.current_wait_merge_bridge_gap = False
                         self.start_next_file()
                         return
+
+                    time.sleep(POLL_MS / 1000.0)
+                    continue
+
+                # As soon as first remote voice is heard, switch back to old logic
+                if require_prompt_start and seen_voice:
+                    with self._lock:
+                        self.current_wait_requires_prompt_start = False
+
+                # Old working silence logic, with one narrow exception:
+                # after the first local answer, treat redirect audio + server-2
+                # prompt as one remote turn, but keep the total silence budget
+                # below the Asterisk Record() timeout.
+                if seen_voice and last_voice_ts > 0:
+                    silent_for_ms = (now - last_voice_ts) * 1000.0
+
+                    if silent_for_ms >= SILENCE_AFTER_VOICE_MS:
+                        if merge_bridge_gap:
+                            if silent_for_ms >= POST_REDIRECT_TOTAL_SILENCE_MS:
+                                print(
+                                    f"*** remote turn seems finished after total post-redirect silence "
+                                    f"({label}) silent_for_ms={silent_for_ms:.0f}"
+                                )
+                                with self._lock:
+                                    self._waiting_for_remote = False
+                                    self.current_wait_requires_prompt_start = False
+                                    self.current_wait_merge_bridge_gap = False
+                                self.start_next_file()
+                                return
+                            else:
+                                print(
+                                    f"*** possible remote turn end ({label}); "
+                                    f"still waiting for resumed audio, "
+                                    f"silent_for_ms={silent_for_ms:.0f}/"
+                                    f"{POST_REDIRECT_TOTAL_SILENCE_MS}"
+                                )
+                        else:
+                            print(f"*** remote turn seems finished ({label})")
+                            with self._lock:
+                                self._waiting_for_remote = False
+                                self.current_wait_requires_prompt_start = False
+                                self.current_wait_merge_bridge_gap = False
+                            self.start_next_file()
+                            return
 
                 if (not seen_voice) and (now - started >= timeout_secs):
                     print(f"*** no remote voice detected, forcing playback ({label})")
                     with self._lock:
                         self._waiting_for_remote = False
-                    self.start_next_file()
-                    return
-
-                if (not prompt_armed) and seen_voice and (now - started >= timeout_secs):
-                    print(f"*** remote voice seen but prompt did not fully arm, forcing playback ({label})")
-                    with self._lock:
-                        self._waiting_for_remote = False
+                        self.current_wait_requires_prompt_start = False
+                        self.current_wait_merge_bridge_gap = False
                     self.start_next_file()
                     return
 
@@ -583,12 +613,15 @@ class MyCall(pj.Call):
         finally:
             with self._lock:
                 self._waiting_for_remote = False
+                self.current_wait_requires_prompt_start = False
+                self.current_wait_merge_bridge_gap = False
 
     def start_next_file(self):
         with self._lock:
             if self.disconnected or not self.call_audio:
                 return
 
+        # Stop silence before sending a real prompt
         self.stop_rtp_keepalive()
 
         with self._lock:
@@ -624,6 +657,8 @@ class MyCall(pj.Call):
             self.start_wait_thread(
                 timeout_secs=NEXT_TURN_WAIT_TIMEOUT_SECS,
                 label=f"after-local-{self.play_idx}",
+                require_prompt_start=False,
+                merge_bridge_gap=(self.play_idx == 1),
             )
         else:
             print("*** playlist complete")
