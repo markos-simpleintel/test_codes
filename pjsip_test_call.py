@@ -3,6 +3,7 @@ import math
 import struct
 import socket
 import threading
+from pathlib import Path
 import pjsua2 as pj
 
 
@@ -12,6 +13,7 @@ import pjsua2 as pj
 LOCAL_SIP_PORT = 5062
 REMOTE_SIP_PORT = 5060
 MEDIA_RTP_PORT = 4000
+MEDIA_RTP_PORT_RANGE = 400
 
 ASTERISK_HOST = "10.29.32.138"
 
@@ -31,23 +33,29 @@ FORCE_BIND_IP = None
 FORCE_PUBLIC_IP = None
 
 PLAYLIST = [
-    "audio1.wav",
-    "audio2.wav",
+    "first.wav",
+    "second.wav",
     "name.wav",
     "birthday.wav",
 ]
+
+# After the whole WAV playlist is done, wait for the next remote prompt
+# to finish (voice detected, then silence detected), then send this DTMF.
+FINAL_DTMF_DIGITS = "5408249373"
 
 # Keep this as whatever file you already have.
 # If your calls are long, you can switch to a longer silence file later.
 SILENCE_PAD_WAV = "silence_60s.wav"
 
-REMOTE_RECORDING = "remote.wav"
-MIXED_RECORDING = "mixed.wav"
+CALLS_OUTPUT_DIR = "call_recordings"
 
-MAX_CALL_SECONDS = 180
+NUM_CALLS = 1
+CALL_START_GAP_MS = 200
+# Change only NUM_CALLS to 10, 20, etc.
+MAX_CALL_SECONDS = 1800
 
 # Old working silence behavior
-SILENCE_AFTER_VOICE_MS = 1000
+SILENCE_AFTER_VOICE_MS = 1500
 POLL_MS = 100
 
 # After the first local answer, cap the total silence budget from the
@@ -58,8 +66,8 @@ POST_REDIRECT_TOTAL_SILENCE_MS = 2200
 VOICE_ENERGY_THRESHOLD = 300.0
 
 # Fallback timeouts
-INITIAL_WAIT_TIMEOUT_SECS = 28
-NEXT_TURN_WAIT_TIMEOUT_SECS = 15
+INITIAL_WAIT_TIMEOUT_SECS = 60
+NEXT_TURN_WAIT_TIMEOUT_SECS = 60
 
 
 # =========================
@@ -220,7 +228,7 @@ def build_account_config(bind_ip: str, transport_id: int) -> pj.AccountConfig:
 
     # Media transport bound to same interface as SIP
     safe_set(acfg.mediaConfig.transportConfig, "port", MEDIA_RTP_PORT)
-    safe_set(acfg.mediaConfig.transportConfig, "portRange", 0)
+    safe_set(acfg.mediaConfig.transportConfig, "portRange", MEDIA_RTP_PORT_RANGE)
     safe_set(acfg.mediaConfig.transportConfig, "boundAddress", bind_ip)
 
     # Keep SDP/media small
@@ -250,6 +258,14 @@ def is_active_audio_media(media_desc) -> bool:
     return True
 
 
+def build_recording_path(kind: str, call_id: int) -> str:
+    out_dir = Path(CALLS_OUTPUT_DIR)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return str(out_dir / f"{kind}_{call_id:02d}.wav")
+
+
+
+
 # =========================
 # ACCOUNT
 # =========================
@@ -268,7 +284,7 @@ class FilePlayer(pj.AudioMediaPlayer):
         self.wav_path = wav_path
 
     def start_into(self, call_audio):
-        print(f"*** starting playback: {self.wav_path}")
+        self.owner.log(f"starting playback: {self.wav_path}")
         self.createPlayer(self.wav_path)
         self.startTransmit(call_audio)
 
@@ -276,10 +292,10 @@ class FilePlayer(pj.AudioMediaPlayer):
             try:
                 self.startTransmit(self.owner.mixed_recorder)
             except pj.Error as e:
-                print(f"*** failed to feed mixed recorder from {self.wav_path}: {e}")
+                self.owner.log(f"failed to feed mixed recorder from {self.wav_path}: {e}")
 
     def onEof2(self):
-        print(f"*** local WAV finished: {self.wav_path}")
+        self.owner.log(f"local WAV finished: {self.wav_path}")
         self.owner.on_player_eof()
 
 
@@ -335,16 +351,17 @@ class RemoteTap(pj.AudioMediaPort):
                     self.owner.last_voice_ts = now
 
         except Exception as e:
-            print(f"*** remote tap frame error: {e}")
+            self.owner.log(f"remote tap frame error: {e}")
 
 
 # =========================
 # CALL
 # =========================
 class MyCall(pj.Call):
-    def __init__(self, ep, acc, dst_uri, wavs, remote_recording, mixed_recording, silence_wav):
+    def __init__(self, ep, acc, call_id, dst_uri, wavs, remote_recording, mixed_recording, silence_wav):
         super().__init__(acc)
         self.ep = ep
+        self.call_id = call_id
         self.dst_uri = dst_uri
         self.wavs = list(wavs)
         self.remote_recording = remote_recording
@@ -359,6 +376,9 @@ class MyCall(pj.Call):
         self.remote_tap = None
 
         self.play_idx = 0
+        self.final_dtmf = FINAL_DTMF_DIGITS
+        self.final_dtmf_sent = False
+
         self.media_ready = False
         self.disconnected = False
         self.connected = False
@@ -378,10 +398,13 @@ class MyCall(pj.Call):
         self.current_wait_requires_prompt_start = False
         self.current_wait_merge_bridge_gap = False
 
+    def log(self, message):
+        print(f"[call-{self.call_id:02d}] {message}")
+
     def onCallState(self, prm):
         ci = self.getInfo()
-        print(
-            f"*** call state: {ci.stateText} | "
+        self.log(
+            f"call state: {ci.stateText} | "
             f"lastStatusCode={ci.lastStatusCode} | "
             f"lastReason={ci.lastReason}"
         )
@@ -413,41 +436,41 @@ class MyCall(pj.Call):
             try:
                 audio_media = self.getAudioMedia(i)
             except pj.Error as e:
-                print(f"*** getAudioMedia failed: {e}")
+                self.log(f"getAudioMedia failed: {e}")
                 continue
 
             with self._lock:
                 self.call_audio = audio_media
                 self.media_ready = True
 
-            print("*** media is ready")
+            self.log("media is ready")
 
             try:
                 if self.recorder is None:
                     self.recorder = pj.AudioMediaRecorder()
                     self.recorder.createRecorder(self.remote_recording)
                     self.call_audio.startTransmit(self.recorder)
-                    print(f"*** remote recording started: {self.remote_recording}")
+                    self.log(f"remote recording started: {self.remote_recording}")
             except pj.Error as e:
-                print(f"*** recorder setup failed: {e}")
+                self.log(f"recorder setup failed: {e}")
 
             try:
                 if self.mixed_recorder is None:
                     self.mixed_recorder = pj.AudioMediaRecorder()
                     self.mixed_recorder.createRecorder(self.mixed_recording)
                     self.call_audio.startTransmit(self.mixed_recorder)
-                    print(f"*** mixed recording started: {self.mixed_recording}")
+                    self.log(f"mixed recording started: {self.mixed_recording}")
             except pj.Error as e:
-                print(f"*** mixed recorder setup failed: {e}")
+                self.log(f"mixed recorder setup failed: {e}")
 
             try:
                 if self.remote_tap is None:
                     self.remote_tap = RemoteTap(self)
                     self.remote_tap.create()
                     self.call_audio.startTransmit(self.remote_tap)
-                    print("*** remote tap started")
+                    self.log("remote tap started")
             except pj.Error as e:
-                print(f"*** remote tap setup failed: {e}")
+                self.log(f"remote tap setup failed: {e}")
 
             # Start outbound silence immediately so Asterisk receives RTP.
             self.start_rtp_keepalive()
@@ -474,9 +497,9 @@ class MyCall(pj.Call):
         try:
             player.createPlayer(self.silence_wav)
             player.startTransmit(call_audio)
-            print(f"*** RTP keepalive silence started: {self.silence_wav}")
+            self.log(f"RTP keepalive silence started: {self.silence_wav}")
         except pj.Error as e:
-            print(f"*** failed to start RTP keepalive silence: {e}")
+            self.log(f"failed to start RTP keepalive silence: {e}")
             with self._lock:
                 self.keepalive_player = None
 
@@ -489,9 +512,9 @@ class MyCall(pj.Call):
         if player and call_audio:
             try:
                 player.stopTransmit(call_audio)
-                print("*** RTP keepalive silence stopped")
+                self.log("RTP keepalive silence stopped")
             except pj.Error as e:
-                print(f"*** failed to stop RTP keepalive silence: {e}")
+                self.log(f"failed to stop RTP keepalive silence: {e}")
 
     def start_wait_thread(self, timeout_secs, label, require_prompt_start=False, merge_bridge_gap=False):
         with self._lock:
@@ -516,10 +539,10 @@ class MyCall(pj.Call):
 
     def wait_for_remote_turn_end(self, timeout_secs, label):
         try:
-            self.ep.libRegisterThread(f"wait-{label}")
-            print(f"*** registered wait thread with PJLIB: {label}")
+            self.ep.libRegisterThread(f"wait-{self.call_id}-{label}")
+            self.log(f"registered wait thread with PJLIB: {label}")
         except pj.Error as e:
-            print(f"*** libRegisterThread warning ({label}): {e}")
+            self.log(f"libRegisterThread warning ({label}): {e}")
 
         started = time.time()
         last_log_at = 0.0
@@ -536,8 +559,8 @@ class MyCall(pj.Call):
                     merge_bridge_gap = self.current_wait_merge_bridge_gap
 
                 if now - last_log_at >= 1.0:
-                    print(
-                        f"*** frame energy ({label}): {energy:.1f} | "
+                    self.log(
+                        f"frame energy ({label}): {energy:.1f} | "
                         f"seen_voice={seen_voice} | "
                         f"require_prompt_start={require_prompt_start} | "
                         f"merge_bridge_gap={merge_bridge_gap}"
@@ -548,12 +571,12 @@ class MyCall(pj.Call):
                 # ignore silence until at least one real remote voice frame is heard.
                 if require_prompt_start and not seen_voice:
                     if now - started >= timeout_secs:
-                        print(f"*** first turn heard no remote voice, forcing playback ({label})")
+                        self.log(f"first turn heard no remote voice, forcing playback ({label})")
                         with self._lock:
                             self._waiting_for_remote = False
                             self.current_wait_requires_prompt_start = False
                             self.current_wait_merge_bridge_gap = False
-                        self.start_next_file()
+                        self.start_next_action()
                         return
 
                     time.sleep(POLL_MS / 1000.0)
@@ -574,39 +597,39 @@ class MyCall(pj.Call):
                     if silent_for_ms >= SILENCE_AFTER_VOICE_MS:
                         if merge_bridge_gap:
                             if silent_for_ms >= POST_REDIRECT_TOTAL_SILENCE_MS:
-                                print(
-                                    f"*** remote turn seems finished after total post-redirect silence "
+                                self.log(
+                                    f"remote turn seems finished after total post-redirect silence "
                                     f"({label}) silent_for_ms={silent_for_ms:.0f}"
                                 )
                                 with self._lock:
                                     self._waiting_for_remote = False
                                     self.current_wait_requires_prompt_start = False
                                     self.current_wait_merge_bridge_gap = False
-                                self.start_next_file()
+                                self.start_next_action()
                                 return
                             else:
-                                print(
-                                    f"*** possible remote turn end ({label}); "
+                                self.log(
+                                    f"possible remote turn end ({label}); "
                                     f"still waiting for resumed audio, "
                                     f"silent_for_ms={silent_for_ms:.0f}/"
                                     f"{POST_REDIRECT_TOTAL_SILENCE_MS}"
                                 )
                         else:
-                            print(f"*** remote turn seems finished ({label})")
+                            self.log(f"remote turn seems finished ({label})")
                             with self._lock:
                                 self._waiting_for_remote = False
                                 self.current_wait_requires_prompt_start = False
                                 self.current_wait_merge_bridge_gap = False
-                            self.start_next_file()
+                            self.start_next_action()
                             return
 
                 if (not seen_voice) and (now - started >= timeout_secs):
-                    print(f"*** no remote voice detected, forcing playback ({label})")
+                    self.log(f"no remote voice detected, forcing playback ({label})")
                     with self._lock:
                         self._waiting_for_remote = False
                         self.current_wait_requires_prompt_start = False
                         self.current_wait_merge_bridge_gap = False
-                    self.start_next_file()
+                    self.start_next_action()
                     return
 
                 time.sleep(POLL_MS / 1000.0)
@@ -616,29 +639,66 @@ class MyCall(pj.Call):
                 self.current_wait_requires_prompt_start = False
                 self.current_wait_merge_bridge_gap = False
 
-    def start_next_file(self):
+    def start_next_action(self):
         with self._lock:
             if self.disconnected or not self.call_audio:
                 return
 
-        # Stop silence before sending a real prompt
+        # Stop silence before sending a real prompt or DTMF
         self.stop_rtp_keepalive()
 
         with self._lock:
-            if self.play_idx >= len(self.wavs):
-                print("*** all playback finished")
-                self.start_rtp_keepalive()
-                return
+            if self.play_idx < len(self.wavs):
+                wav = self.wavs[self.play_idx]
+                self.player = FilePlayer(self, wav)
+                player = self.player
+                call_audio = self.call_audio
+            else:
+                wav = None
+                player = None
+                call_audio = self.call_audio
+                should_send_final_dtmf = bool(self.final_dtmf) and not self.final_dtmf_sent
 
-            wav = self.wavs[self.play_idx]
-            self.player = FilePlayer(self, wav)
-            player = self.player
-            call_audio = self.call_audio
+        if wav is None:
+            if should_send_final_dtmf:
+                self.send_final_dtmf()
+            else:
+                self.log("all playback and final DTMF finished")
+                self.start_rtp_keepalive()
+            return
 
         try:
             player.start_into(call_audio)
         except pj.Error as e:
-            print(f"*** playback start failed for {wav}: {e}")
+            self.log(f"playback start failed for {wav}: {e}")
+            self.start_rtp_keepalive()
+
+    def send_final_dtmf(self):
+        with self._lock:
+            if self.disconnected or not self.call_audio:
+                return
+
+            if self.final_dtmf_sent or not self.final_dtmf:
+                self.start_rtp_keepalive()
+                return
+
+            digits = self.final_dtmf
+            self.final_dtmf_sent = True
+
+        try:
+            self.log(f"sending final DTMF after remote prompt end: {digits}")
+            if hasattr(self, "dialDtmf"):
+                self.dialDtmf(digits)
+            else:
+                prm = pj.CallSendDtmfParam()
+                prm.digits = digits
+                self.sendDtmf(prm)
+            self.log("final DTMF sent")
+        except pj.Error as e:
+            self.log(f"final DTMF send failed: {e}")
+        except Exception as e:
+            self.log(f"final DTMF send unexpected error: {e}")
+        finally:
             self.start_rtp_keepalive()
 
     def on_player_eof(self):
@@ -650,9 +710,10 @@ class MyCall(pj.Call):
                 return
 
             next_needed = self.play_idx < len(self.wavs)
+            should_wait_for_final_dtmf = bool(self.final_dtmf) and not self.final_dtmf_sent
 
         if next_needed:
-            print("*** waiting for next remote response before next WAV")
+            self.log("waiting for next remote response before next WAV")
             self.start_rtp_keepalive()
             self.start_wait_thread(
                 timeout_secs=NEXT_TURN_WAIT_TIMEOUT_SECS,
@@ -660,8 +721,17 @@ class MyCall(pj.Call):
                 require_prompt_start=False,
                 merge_bridge_gap=(self.play_idx == 1),
             )
+        elif should_wait_for_final_dtmf:
+            self.log("playlist complete, waiting for final remote prompt end before DTMF")
+            self.start_rtp_keepalive()
+            self.start_wait_thread(
+                timeout_secs=NEXT_TURN_WAIT_TIMEOUT_SECS,
+                label="before-final-dtmf",
+                require_prompt_start=False,
+                merge_bridge_gap=False,
+            )
         else:
-            print("*** playlist complete")
+            self.log("playlist complete")
             self.start_rtp_keepalive()
 
     def start(self):
@@ -680,7 +750,7 @@ class MyCall(pj.Call):
             prm = pj.CallOpParam()
             self.hangup(prm)
         except Exception as e:
-            print(f"*** hangup warning: {e}")
+            self.log(f"hangup warning: {e}")
 
 
 # =========================
@@ -689,7 +759,7 @@ class MyCall(pj.Call):
 def main():
     ep = pj.Endpoint()
     acc = None
-    call = None
+    calls = []
 
     try:
         bind_ip = get_bind_ip()
@@ -716,36 +786,46 @@ def main():
         acc.create(acfg)
 
         print("*** account created without registration")
-        print("*** starting direct INVITE call")
+        print(f"*** starting {NUM_CALLS} direct INVITE call(s)")
 
-        call = MyCall(
-            ep=ep,
-            acc=acc,
-            dst_uri=DEST_URI,
-            wavs=PLAYLIST,
-            remote_recording=REMOTE_RECORDING,
-            mixed_recording=MIXED_RECORDING,
-            silence_wav=SILENCE_PAD_WAV,
-        )
-        call.start()
+        for call_id in range(1, NUM_CALLS + 1):
+            call = MyCall(
+                ep=ep,
+                acc=acc,
+                call_id=call_id,
+                dst_uri=DEST_URI,
+                wavs=PLAYLIST,
+                remote_recording=build_recording_path("remote", call_id),
+                mixed_recording=build_recording_path("mixed", call_id),
+                silence_wav=SILENCE_PAD_WAV,
+            )
+            calls.append(call)
+            call.log(f"starting direct INVITE call to {DEST_URI}")
+            call.start()
+
+            if call_id < NUM_CALLS and CALL_START_GAP_MS > 0:
+                time.sleep(CALL_START_GAP_MS / 1000.0)
 
         started = time.time()
         while time.time() - started < MAX_CALL_SECONDS:
-            if call.disconnected:
+            active_calls = [call for call in calls if not call.disconnected]
+            if not active_calls:
                 break
             time.sleep(0.1)
 
-        if call and not call.disconnected:
-            print("*** max call time reached, hanging up")
-            call.safe_hangup()
+        remaining_calls = [call for call in calls if not call.disconnected]
+        if remaining_calls:
+            print(f"*** max call time reached, hanging up {len(remaining_calls)} remaining call(s)")
+            for call in remaining_calls:
+                call.safe_hangup()
 
             wait_start = time.time()
             while time.time() - wait_start < 3:
-                if call.disconnected:
+                if all(call.disconnected for call in calls):
                     break
                 time.sleep(0.1)
 
-        call = None
+        calls.clear()
         acc = None
         time.sleep(1.0)
 
