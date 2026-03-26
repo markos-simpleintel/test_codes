@@ -23,56 +23,36 @@ CALLER_DISPLAY = "Rahul"
 
 DEST_URI = f"sip:19073750302@{ASTERISK_HOST}:{REMOTE_SIP_PORT}"
 
-# Keep UDP first so it stays close to your SIPp test.
 USE_TCP = False
-
-# Let the code auto-pick the local interface used to reach Asterisk.
 FORCE_BIND_IP = None
-
-# Usually leave this empty. Only set it if you explicitly want a different advertised address.
 FORCE_PUBLIC_IP = None
 
-PLAYLIST = [
-    "first.wav",
-    "second.wav",
-    "name.wav",
-    "birthday.wav",
+ACTIONS = [
+    ("wav", "first.wav"),
+    ("wav", "second.wav"),
+    ("wav", "name.wav"),
+    ("wav", "birthday.wav"),
+    ("dtmf", "5408249373"),
+    ("wav", "yes.wav"),
+    ("wav", "no.wav"),
 ]
 
-# After the whole WAV playlist is done, wait for the next remote prompt
-# to finish (voice detected, then silence detected), then send this DTMF.
-FINAL_DTMF_DIGITS = "5408249373"
-
-# Keep this as whatever file you already have.
-# If your calls are long, you can switch to a longer silence file later.
 SILENCE_PAD_WAV = "silence_60s.wav"
-
 CALLS_OUTPUT_DIR = "call_recordings"
 
 NUM_CALLS = 1
 CALL_START_GAP_MS = 200
-# Change only NUM_CALLS to 10, 20, etc.
 MAX_CALL_SECONDS = 1800
 
-# Old working silence behavior
 SILENCE_AFTER_VOICE_MS = 1500
 POLL_MS = 100
-
-# After the first local answer, cap the total silence budget from the
-# last remote voice frame so we speak before Asterisk Record() times out.
 POST_REDIRECT_TOTAL_SILENCE_MS = 2200
+VOICE_ENERGY_THRESHOLD = 180.0
 
-# Frame-energy VAD threshold
-VOICE_ENERGY_THRESHOLD = 300.0
-
-# Fallback timeouts
 INITIAL_WAIT_TIMEOUT_SECS = 60
 NEXT_TURN_WAIT_TIMEOUT_SECS = 60
 
 
-# =========================
-# HELPERS
-# =========================
 def safe_set(obj, attr, value):
     if not hasattr(obj, attr):
         return False
@@ -111,9 +91,6 @@ def print_transport_info(ep: pj.Endpoint, transport_id: int):
 
 
 def configure_codecs(ep: pj.Endpoint):
-    """
-    Keep only PCMU active so the SDP is as small/simple as possible.
-    """
     try:
         codec_infos = ep.codecEnum2()
     except Exception as e:
@@ -143,8 +120,6 @@ def configure_codecs(ep: pj.Endpoint):
 def make_transport(ep: pj.Endpoint, bind_ip: str) -> int:
     tp_cfg = pj.TransportConfig()
     tp_cfg.port = LOCAL_SIP_PORT
-
-    # Bind to the exact interface we are actually using to reach Asterisk
     safe_set(tp_cfg, "boundAddress", bind_ip)
 
     if FORCE_PUBLIC_IP:
@@ -160,21 +135,17 @@ def make_transport(ep: pj.Endpoint, bind_ip: str) -> int:
         tp_type = pj.PJSIP_TRANSPORT_UDP
         print("*** using UDP transport")
 
-    transport_id = ep.transportCreate(tp_type, tp_cfg)
-    return transport_id
+    return ep.transportCreate(tp_type, tp_cfg)
 
 
 def configure_endpoint(ep_cfg: pj.EpConfig):
-    # Logging
     ep_cfg.logConfig.level = 5
     ep_cfg.logConfig.consoleLevel = 5
 
-    # Keep UA side minimal
     safe_set(ep_cfg.uaConfig, "userAgent", "")
     safe_set(ep_cfg.uaConfig, "natTypeInSdp", 0)
     safe_set(ep_cfg.uaConfig, "enableUpnp", False)
 
-    # Media defaults
     ep_cfg.medConfig.clockRate = 8000
     ep_cfg.medConfig.channelCount = 1
     ep_cfg.medConfig.sndClockRate = 8000
@@ -186,34 +157,25 @@ def configure_endpoint(ep_cfg: pj.EpConfig):
 def build_account_config(bind_ip: str, transport_id: int) -> pj.AccountConfig:
     acfg = pj.AccountConfig()
 
-    # SIPp-like From identity
     acfg.idUri = f'"{CALLER_DISPLAY}" <sip:{CALLER_USER}@{ASTERISK_HOST}>'
-
-    # Do not REGISTER
     acfg.regConfig.registerOnAdd = False
 
-    # Use only the chosen transport
     safe_set(acfg.sipConfig, "transportId", transport_id)
 
-    # Credentials for 401 on INVITE
     acfg.sipConfig.authCreds.append(
         pj.AuthCredInfo("digest", "*", CALLER_USER, 0, CALLER_PASS)
     )
 
-    # Keep auth flow like SIPp
     safe_set(acfg.sipConfig, "authInitialEmpty", False)
     safe_set(acfg.sipConfig, "useSharedAuth", False)
 
-    # Force a simple Contact and avoid extra Contact decorations
     safe_set(acfg.sipConfig, "contactForced", f"sip:{CALLER_USER}@{bind_ip}:{LOCAL_SIP_PORT}")
     safe_set(acfg.sipConfig, "contactParams", "")
     safe_set(acfg.sipConfig, "contactUriParams", "")
 
-    # Minimize feature headers
     safe_set(acfg.callConfig, "prackUse", pj.PJSUA_100REL_NOT_USED)
     safe_set(acfg.callConfig, "timerUse", pj.PJSUA_SIP_TIMER_INACTIVE)
 
-    # Minimize NAT/account-side rewriting
     safe_set(acfg.natConfig, "contactRewriteUse", 0)
     safe_set(acfg.natConfig, "viaRewriteUse", 0)
     safe_set(acfg.natConfig, "sdpNatRewriteUse", 0)
@@ -226,12 +188,10 @@ def build_account_config(bind_ip: str, transport_id: int) -> pj.AccountConfig:
     safe_set(acfg.natConfig, "iceNoRtcp", True)
     safe_set(acfg.natConfig, "iceAlwaysUpdate", False)
 
-    # Media transport bound to same interface as SIP
     safe_set(acfg.mediaConfig.transportConfig, "port", MEDIA_RTP_PORT)
     safe_set(acfg.mediaConfig.transportConfig, "portRange", MEDIA_RTP_PORT_RANGE)
     safe_set(acfg.mediaConfig.transportConfig, "boundAddress", bind_ip)
 
-    # Keep SDP/media small
     safe_set(acfg.mediaConfig, "lockCodecEnabled", False)
     safe_set(acfg.mediaConfig, "streamKaEnabled", False)
     safe_set(acfg.mediaConfig, "rtcpXrEnabled", False)
@@ -264,19 +224,11 @@ def build_recording_path(kind: str, call_id: int) -> str:
     return str(out_dir / f"{kind}_{call_id:02d}.wav")
 
 
-
-
-# =========================
-# ACCOUNT
-# =========================
 class MyAccount(pj.Account):
     def __init__(self):
         super().__init__()
 
 
-# =========================
-# PLAYER
-# =========================
 class FilePlayer(pj.AudioMediaPlayer):
     def __init__(self, owner, wav_path):
         super().__init__()
@@ -296,12 +248,9 @@ class FilePlayer(pj.AudioMediaPlayer):
 
     def onEof2(self):
         self.owner.log(f"local WAV finished: {self.wav_path}")
-        self.owner.on_player_eof()
+        self.owner.on_action_complete()
 
 
-# =========================
-# REMOTE AUDIO TAP
-# =========================
 class RemoteTap(pj.AudioMediaPort):
     def __init__(self, owner):
         super().__init__()
@@ -354,16 +303,13 @@ class RemoteTap(pj.AudioMediaPort):
             self.owner.log(f"remote tap frame error: {e}")
 
 
-# =========================
-# CALL
-# =========================
 class MyCall(pj.Call):
-    def __init__(self, ep, acc, call_id, dst_uri, wavs, remote_recording, mixed_recording, silence_wav):
+    def __init__(self, ep, acc, call_id, dst_uri, actions, remote_recording, mixed_recording, silence_wav):
         super().__init__(acc)
         self.ep = ep
         self.call_id = call_id
         self.dst_uri = dst_uri
-        self.wavs = list(wavs)
+        self.actions = list(actions)
         self.remote_recording = remote_recording
         self.mixed_recording = mixed_recording
         self.silence_wav = silence_wav
@@ -375,10 +321,8 @@ class MyCall(pj.Call):
         self.keepalive_player = None
         self.remote_tap = None
 
-        self.play_idx = 0
-        self.final_dtmf = FINAL_DTMF_DIGITS
-        self.final_dtmf_sent = False
-
+        self.action_idx = 0
+        self.last_action_type = None
         self.media_ready = False
         self.disconnected = False
         self.connected = False
@@ -388,13 +332,11 @@ class MyCall(pj.Call):
         self._wait_thread = None
         self._waiting_for_remote = False
 
-        # Real remote-audio VAD state
         self.voice_energy_threshold = VOICE_ENERGY_THRESHOLD
         self.remote_seen_voice = False
         self.last_voice_ts = 0.0
         self.last_frame_energy = 0.0
 
-        # Wait-mode flags
         self.current_wait_requires_prompt_start = False
         self.current_wait_merge_bridge_gap = False
 
@@ -472,11 +414,7 @@ class MyCall(pj.Call):
             except pj.Error as e:
                 self.log(f"remote tap setup failed: {e}")
 
-            # Start outbound silence immediately so Asterisk receives RTP.
             self.start_rtp_keepalive()
-
-            # First turn only:
-            # ignore silence until we've heard real remote audio once.
             self.start_wait_thread(
                 timeout_secs=INITIAL_WAIT_TIMEOUT_SECS,
                 label="initial-remote-turn",
@@ -544,7 +482,6 @@ class MyCall(pj.Call):
         except pj.Error as e:
             self.log(f"libRegisterThread warning ({label}): {e}")
 
-        started = time.time()
         last_log_at = 0.0
 
         try:
@@ -567,30 +504,14 @@ class MyCall(pj.Call):
                     )
                     last_log_at = now
 
-                # First turn only:
-                # ignore silence until at least one real remote voice frame is heard.
                 if require_prompt_start and not seen_voice:
-                    if now - started >= timeout_secs:
-                        self.log(f"first turn heard no remote voice, forcing playback ({label})")
-                        with self._lock:
-                            self._waiting_for_remote = False
-                            self.current_wait_requires_prompt_start = False
-                            self.current_wait_merge_bridge_gap = False
-                        self.start_next_action()
-                        return
-
                     time.sleep(POLL_MS / 1000.0)
                     continue
 
-                # As soon as first remote voice is heard, switch back to old logic
                 if require_prompt_start and seen_voice:
                     with self._lock:
                         self.current_wait_requires_prompt_start = False
 
-                # Old working silence logic, with one narrow exception:
-                # after the first local answer, treat redirect audio + server-2
-                # prompt as one remote turn, but keep the total silence budget
-                # below the Asterisk Record() timeout.
                 if seen_voice and last_voice_ts > 0:
                     silent_for_ms = (now - last_voice_ts) * 1000.0
 
@@ -623,15 +544,6 @@ class MyCall(pj.Call):
                             self.start_next_action()
                             return
 
-                if (not seen_voice) and (now - started >= timeout_secs):
-                    self.log(f"no remote voice detected, forcing playback ({label})")
-                    with self._lock:
-                        self._waiting_for_remote = False
-                        self.current_wait_requires_prompt_start = False
-                        self.current_wait_merge_bridge_gap = False
-                    self.start_next_action()
-                    return
-
                 time.sleep(POLL_MS / 1000.0)
         finally:
             with self._lock:
@@ -643,104 +555,77 @@ class MyCall(pj.Call):
         with self._lock:
             if self.disconnected or not self.call_audio:
                 return
+            if self.action_idx >= len(self.actions):
+                self.log("all actions finished")
+                return
+            action_type, action_value = self.actions[self.action_idx]
+            self.last_action_type = action_type
+            call_audio = self.call_audio
 
-        # Stop silence before sending a real prompt or DTMF
         self.stop_rtp_keepalive()
 
-        with self._lock:
-            if self.play_idx < len(self.wavs):
-                wav = self.wavs[self.play_idx]
-                self.player = FilePlayer(self, wav)
+        if action_type == "wav":
+            with self._lock:
+                self.player = FilePlayer(self, action_value)
                 player = self.player
-                call_audio = self.call_audio
-            else:
-                wav = None
-                player = None
-                call_audio = self.call_audio
-                should_send_final_dtmf = bool(self.final_dtmf) and not self.final_dtmf_sent
 
-        if wav is None:
-            if should_send_final_dtmf:
-                self.send_final_dtmf()
-            else:
-                self.log("all playback and final DTMF finished")
+            try:
+                player.start_into(call_audio)
+            except pj.Error as e:
+                self.log(f"playback start failed for {action_value}: {e}")
                 self.start_rtp_keepalive()
             return
 
-        try:
-            player.start_into(call_audio)
-        except pj.Error as e:
-            self.log(f"playback start failed for {wav}: {e}")
-            self.start_rtp_keepalive()
+        if action_type == "dtmf":
+            try:
+                self.log(f"sending DTMF: {action_value}")
+                if hasattr(self, "dialDtmf"):
+                    self.dialDtmf(action_value)
+                else:
+                    prm = pj.CallSendDtmfParam()
+                    prm.digits = action_value
+                    self.sendDtmf(prm)
+                self.log("DTMF sent")
+            except pj.Error as e:
+                self.log(f"DTMF send failed: {e}")
+            except Exception as e:
+                self.log(f"DTMF send unexpected error: {e}")
+            finally:
+                self.on_action_complete()
+            return
 
-    def send_final_dtmf(self):
+        self.log(f"unknown action type: {action_type}")
+        self.on_action_complete()
+
+    def on_action_complete(self):
         with self._lock:
-            if self.disconnected or not self.call_audio:
-                return
-
-            if self.final_dtmf_sent or not self.final_dtmf:
-                self.start_rtp_keepalive()
-                return
-
-            digits = self.final_dtmf
-            self.final_dtmf_sent = True
-
-        try:
-            self.log(f"sending final DTMF after remote prompt end: {digits}")
-            if hasattr(self, "dialDtmf"):
-                self.dialDtmf(digits)
-            else:
-                prm = pj.CallSendDtmfParam()
-                prm.digits = digits
-                self.sendDtmf(prm)
-            self.log("final DTMF sent")
-        except pj.Error as e:
-            self.log(f"final DTMF send failed: {e}")
-        except Exception as e:
-            self.log(f"final DTMF send unexpected error: {e}")
-        finally:
-            self.start_rtp_keepalive()
-
-    def on_player_eof(self):
-        with self._lock:
-            self.play_idx += 1
+            self.action_idx += 1
             self.player = None
 
             if self.disconnected:
                 return
 
-            next_needed = self.play_idx < len(self.wavs)
-            should_wait_for_final_dtmf = bool(self.final_dtmf) and not self.final_dtmf_sent
+            next_needed = self.action_idx < len(self.actions)
+            require_new_prompt = (self.last_action_type == "dtmf")
 
         if next_needed:
-            self.log("waiting for next remote response before next WAV")
+            self.log("waiting for next remote response before next action")
             self.start_rtp_keepalive()
             self.start_wait_thread(
                 timeout_secs=NEXT_TURN_WAIT_TIMEOUT_SECS,
-                label=f"after-local-{self.play_idx}",
-                require_prompt_start=False,
-                merge_bridge_gap=(self.play_idx == 1),
-            )
-        elif should_wait_for_final_dtmf:
-            self.log("playlist complete, waiting for final remote prompt end before DTMF")
-            self.start_rtp_keepalive()
-            self.start_wait_thread(
-                timeout_secs=NEXT_TURN_WAIT_TIMEOUT_SECS,
-                label="before-final-dtmf",
-                require_prompt_start=False,
-                merge_bridge_gap=False,
+                label=f"after-action-{self.action_idx}",
+                require_prompt_start=require_new_prompt,
+                merge_bridge_gap=(self.action_idx == 1),
             )
         else:
-            self.log("playlist complete")
+            self.log("action sequence complete")
             self.start_rtp_keepalive()
 
     def start(self):
         prm = pj.CallOpParam(True)
-
         prm.opt.audioCount = 1
         prm.opt.videoCount = 0
         prm.opt.textCount = 0
-
         self.makeCall(self.dst_uri, prm)
 
     def safe_hangup(self):
@@ -753,9 +638,6 @@ class MyCall(pj.Call):
             self.log(f"hangup warning: {e}")
 
 
-# =========================
-# MAIN
-# =========================
 def main():
     ep = pj.Endpoint()
     acc = None
@@ -770,7 +652,6 @@ def main():
 
         ep.libCreate()
         ep.libInit(ep_cfg)
-
         ep.audDevManager().setNullDev()
 
         transport_id = make_transport(ep, bind_ip)
@@ -794,7 +675,7 @@ def main():
                 acc=acc,
                 call_id=call_id,
                 dst_uri=DEST_URI,
-                wavs=PLAYLIST,
+                actions=ACTIONS,
                 remote_recording=build_recording_path("remote", call_id),
                 mixed_recording=build_recording_path("mixed", call_id),
                 silence_wav=SILENCE_PAD_WAV,
