@@ -1,3 +1,4 @@
+import gc
 import time
 import math
 import struct
@@ -44,9 +45,15 @@ NUM_CALLS = 1
 CALL_START_GAP_MS = 200
 MAX_CALL_SECONDS = 1800
 
+# Added:
+# Give PJSUA a higher call capacity than NUM_CALLS so it does not stop at 4.
+# Stay comfortably below the usual compile-time default limit of 32.
+MAX_CALLS_HEADROOM = 4
+MIN_RUNTIME_MAX_CALLS = 8
+
 SILENCE_AFTER_VOICE_MS = 1500
 POLL_MS = 100
-POST_REDIRECT_TOTAL_SILENCE_MS = 2200
+POST_REDIRECT_TOTAL_SILENCE_MS = 2
 VOICE_ENERGY_THRESHOLD = 180.0
 
 INITIAL_WAIT_TIMEOUT_SECS = 60
@@ -145,6 +152,14 @@ def configure_endpoint(ep_cfg: pj.EpConfig):
     safe_set(ep_cfg.uaConfig, "userAgent", "")
     safe_set(ep_cfg.uaConfig, "natTypeInSdp", 0)
     safe_set(ep_cfg.uaConfig, "enableUpnp", False)
+
+    # Added:
+    # Default PJSUA maxCalls is 4 unless overridden.
+    requested_max_calls = max(NUM_CALLS + MAX_CALLS_HEADROOM, MIN_RUNTIME_MAX_CALLS)
+    if safe_set(ep_cfg.uaConfig, "maxCalls", requested_max_calls):
+        print(f"*** uaConfig.maxCalls set to {requested_max_calls}")
+    else:
+        print("*** warning: could not set uaConfig.maxCalls")
 
     ep_cfg.medConfig.clockRate = 8000
     ep_cfg.medConfig.channelCount = 1
@@ -304,18 +319,16 @@ class RemoteTap(pj.AudioMediaPort):
 
 
 class MyCall(pj.Call):
-    def __init__(self, ep, acc, call_id, dst_uri, actions, remote_recording, mixed_recording, silence_wav):
+    def __init__(self, ep, acc, call_id, dst_uri, actions, mixed_recording, silence_wav):
         super().__init__(acc)
         self.ep = ep
         self.call_id = call_id
         self.dst_uri = dst_uri
         self.actions = list(actions)
-        self.remote_recording = remote_recording
         self.mixed_recording = mixed_recording
         self.silence_wav = silence_wav
 
         self.call_audio = None
-        self.recorder = None
         self.mixed_recorder = None
         self.player = None
         self.keepalive_player = None
@@ -361,7 +374,6 @@ class MyCall(pj.Call):
             with self._lock:
                 self.call_audio = None
                 self.player = None
-                self.recorder = None
                 self.mixed_recorder = None
                 self.remote_tap = None
                 self._waiting_for_remote = False
@@ -386,15 +398,6 @@ class MyCall(pj.Call):
                 self.media_ready = True
 
             self.log("media is ready")
-
-            try:
-                if self.recorder is None:
-                    self.recorder = pj.AudioMediaRecorder()
-                    self.recorder.createRecorder(self.remote_recording)
-                    self.call_audio.startTransmit(self.recorder)
-                    self.log(f"remote recording started: {self.remote_recording}")
-            except pj.Error as e:
-                self.log(f"recorder setup failed: {e}")
 
             try:
                 if self.mixed_recorder is None:
@@ -483,10 +486,20 @@ class MyCall(pj.Call):
             self.log(f"libRegisterThread warning ({label}): {e}")
 
         last_log_at = 0.0
+        started_at = time.time()
 
         try:
             while not self._stop_evt.is_set():
                 now = time.time()
+
+                if timeout_secs and (now - started_at) >= timeout_secs:
+                    self.log(f"wait timeout reached ({label})")
+                    with self._lock:
+                        self._waiting_for_remote = False
+                        self.current_wait_requires_prompt_start = False
+                        self.current_wait_merge_bridge_gap = False
+                    self.start_next_action()
+                    return
 
                 with self._lock:
                     seen_voice = self.remote_seen_voice
@@ -632,6 +645,11 @@ class MyCall(pj.Call):
         if self.disconnected:
             return
         try:
+            if self.getId() < 0:
+                return  # makeCall() never succeeded — no valid PJSIP slot
+        except Exception:
+            return
+        try:
             prm = pj.CallOpParam()
             self.hangup(prm)
         except Exception as e:
@@ -676,7 +694,6 @@ def main():
                 call_id=call_id,
                 dst_uri=DEST_URI,
                 actions=ACTIONS,
-                remote_recording=build_recording_path("remote", call_id),
                 mixed_recording=build_recording_path("mixed", call_id),
                 silence_wav=SILENCE_PAD_WAV,
             )
@@ -706,15 +723,34 @@ def main():
                     break
                 time.sleep(0.1)
 
-        calls.clear()
-        acc = None
-        time.sleep(1.0)
-
     except pj.Error as e:
         print(f"*** PJSUA2 error: {e}")
     except Exception as e:
         print(f"*** general error: {e}")
     finally:
+        for call in calls:
+            if not call.disconnected:
+                call.safe_hangup()
+
+        wait_start = time.time()
+        while time.time() - wait_start < 5:
+            if all(c.disconnected for c in calls):
+                break
+            time.sleep(0.1)
+
+        # Join wait threads so their bound-method references to MyCall are released
+        # before calls.clear() drops the list reference. Without this, a running
+        # thread keeps MyCall alive past libDestroy(), causing the C-level assertion
+        # "call_id >= 0 && call_id < max_calls" when the destructor fires too late.
+        for call in calls:
+            t = call._wait_thread
+            if t is not None and t.is_alive():
+                t.join(timeout=2.0)
+
+        calls.clear()
+        acc = None
+        gc.collect()  # break any remaining reference cycles so pj.Call destructors fire now
+
         try:
             ep.libDestroy()
         except Exception as e:
