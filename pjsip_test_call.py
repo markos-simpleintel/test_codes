@@ -35,6 +35,9 @@ ACTIONS = [
     ("wav", "birthday.wav"),
     ("dtmf", "5408249373"),
     ("wav", "yes.wav"),
+    ("wav","reschedul.wav"),
+    ("wav", "yes.wav"),
+    ("wav", "yes.wav"),
     ("wav", "no.wav"),
 ]
 
@@ -53,7 +56,7 @@ MIN_RUNTIME_MAX_CALLS = 8
 
 SILENCE_AFTER_VOICE_MS = 1500
 POLL_MS = 100
-POST_REDIRECT_TOTAL_SILENCE_MS = 2
+POST_REDIRECT_TOTAL_SILENCE_MS = 2000
 VOICE_ENERGY_THRESHOLD = 180.0
 
 INITIAL_WAIT_TIMEOUT_SECS = 60
@@ -245,14 +248,15 @@ class MyAccount(pj.Account):
 
 
 class FilePlayer(pj.AudioMediaPlayer):
-    def __init__(self, owner, wav_path):
+    def __init__(self, owner, wav_path, action_idx):
         super().__init__()
         self.owner = owner
         self.wav_path = wav_path
+        self.action_idx = action_idx
 
     def start_into(self, call_audio):
         self.owner.log(f"starting playback: {self.wav_path}")
-        self.createPlayer(self.wav_path)
+        self.createPlayer(self.wav_path, pj.PJMEDIA_FILE_NO_LOOP)
         self.startTransmit(call_audio)
 
         if self.owner.mixed_recorder is not None:
@@ -263,7 +267,7 @@ class FilePlayer(pj.AudioMediaPlayer):
 
     def onEof2(self):
         self.owner.log(f"local WAV finished: {self.wav_path}")
-        self.owner.on_action_complete()
+        self.owner.on_action_complete(expected_idx=self.action_idx)
 
 
 class RemoteTap(pj.AudioMediaPort):
@@ -564,6 +568,29 @@ class MyCall(pj.Call):
                 self.current_wait_requires_prompt_start = False
                 self.current_wait_merge_bridge_gap = False
 
+    def _send_dtmf_digits(self, digits, expected_idx):
+        INTER_DIGIT_MS = 200  # ms between digits — increase if still doubling
+
+        try:
+            self.ep.libRegisterThread(f"dtmf-{self.call_id}")
+        except pj.Error as e:
+            self.log(f"libRegisterThread warning (dtmf): {e}")
+
+        self.log(f"sending DTMF digit-by-digit: {digits}")
+        for digit in digits:
+            if self.disconnected:
+                break
+            try:
+                self.dialDtmf(digit)
+                self.log(f"DTMF digit sent: {digit}")
+            except pj.Error as e:
+                self.log(f"DTMF digit {digit} failed: {e}")
+            except Exception as e:
+                self.log(f"DTMF digit {digit} unexpected error: {e}")
+            time.sleep(INTER_DIGIT_MS / 1000.0)
+        self.log("DTMF sequence complete")
+        self.on_action_complete(expected_idx=expected_idx)
+
     def start_next_action(self):
         with self._lock:
             if self.disconnected or not self.call_audio:
@@ -572,6 +599,7 @@ class MyCall(pj.Call):
                 self.log("all actions finished")
                 return
             action_type, action_value = self.actions[self.action_idx]
+            expected_idx = self.action_idx
             self.last_action_type = action_type
             call_audio = self.call_audio
 
@@ -579,7 +607,7 @@ class MyCall(pj.Call):
 
         if action_type == "wav":
             with self._lock:
-                self.player = FilePlayer(self, action_value)
+                self.player = FilePlayer(self, action_value, expected_idx)
                 player = self.player
 
             try:
@@ -590,28 +618,22 @@ class MyCall(pj.Call):
             return
 
         if action_type == "dtmf":
-            try:
-                self.log(f"sending DTMF: {action_value}")
-                if hasattr(self, "dialDtmf"):
-                    self.dialDtmf(action_value)
-                else:
-                    prm = pj.CallSendDtmfParam()
-                    prm.digits = action_value
-                    self.sendDtmf(prm)
-                self.log("DTMF sent")
-            except pj.Error as e:
-                self.log(f"DTMF send failed: {e}")
-            except Exception as e:
-                self.log(f"DTMF send unexpected error: {e}")
-            finally:
-                self.on_action_complete()
+            threading.Thread(
+                target=self._send_dtmf_digits,
+                args=(action_value, expected_idx),
+                daemon=True,
+            ).start()
             return
 
         self.log(f"unknown action type: {action_type}")
-        self.on_action_complete()
+        self.on_action_complete(expected_idx=expected_idx)
 
-    def on_action_complete(self):
+    def on_action_complete(self, expected_idx=None):
         with self._lock:
+            # Guard: if another thread (e.g. a second onEof2 from file looping)
+            # already advanced action_idx past what we expect, skip this call.
+            if expected_idx is not None and self.action_idx != expected_idx:
+                return
             self.action_idx += 1
             self.player = None
 
@@ -633,6 +655,38 @@ class MyCall(pj.Call):
         else:
             self.log("action sequence complete")
             self.start_rtp_keepalive()
+
+    def onCallTransferRequest(self, prm):
+        # Fires when Asterisk sends a SIP REFER to us
+        self.log(f"*** TRANSFER via REFER to: {prm.dstUri} — declining and hanging up")
+        prm.statusCode = 603  # Decline
+        threading.Thread(target=self._hangup_after_transfer, daemon=True).start()
+
+    def onCallRedirected(self, prm):
+        # Fires when Asterisk sends a 3xx redirect
+        target = getattr(prm, "targetUri", "<unknown>")
+        self.log(f"*** TRANSFER via 3xx redirect to: {target} — hanging up")
+        prm.opt = getattr(pj, "PJSIP_REDIRECT_STOP", 2)  # stop following redirects
+        threading.Thread(target=self._hangup_after_transfer, daemon=True).start()
+
+    def onCallReplaced(self, prm):
+        # Fires when our call is replaced (attended transfer)
+        self.log("*** TRANSFER via call replace — hanging up")
+        threading.Thread(target=self._hangup_after_transfer, daemon=True).start()
+
+    def onCallTsxState(self, prm):
+        # Log every SIP transaction so we can see what Asterisk sends during transfer
+        try:
+            e = prm.e
+            method = getattr(e.body.tsxState, "method", "")
+            status = getattr(e.body.tsxState, "statusCode", "")
+            self.log(f"SIP tsx: method={method} status={status}")
+        except Exception:
+            pass
+
+    def _hangup_after_transfer(self):
+        time.sleep(0.3)
+        self.safe_hangup()
 
     def start(self):
         prm = pj.CallOpParam(True)
