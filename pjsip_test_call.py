@@ -1,28 +1,32 @@
 import gc
+import os
 import time
 import math
 import struct
 import socket
 import threading
 from pathlib import Path
+from dotenv import load_dotenv
 import pjsua2 as pj
 
+load_dotenv()
 
 # =========================
 # CONFIG
 # =========================
-LOCAL_SIP_PORT = 5062
-REMOTE_SIP_PORT = 5060
-MEDIA_RTP_PORT = 4000
-MEDIA_RTP_PORT_RANGE = 400
+LOCAL_SIP_PORT = int(os.getenv("LOCAL_SIP_PORT", "5062"))
+REMOTE_SIP_PORT = int(os.getenv("REMOTE_SIP_PORT", "5060"))
+MEDIA_RTP_PORT = int(os.getenv("MEDIA_RTP_PORT", "4000"))
+MEDIA_RTP_PORT_RANGE = int(os.getenv("MEDIA_RTP_PORT_RANGE", "400"))
 
-ASTERISK_HOST = "10.29.32.138"
+ASTERISK_HOST = os.getenv("ASTERISK_HOST", "10.29.32.138")
 
-CALLER_USER = "1001"
-CALLER_PASS = "b0f1306769fe67fec2b2e0941e34d962"
-CALLER_DISPLAY = "Rahul"
+CALLER_USER = os.getenv("CALLER_USER", "1001")
+CALLER_PASS = os.getenv("CALLER_PASS", "")
+CALLER_DISPLAY = os.getenv("CALLER_DISPLAY", "Rahul")
 
-DEST_URI = f"sip:19073750302@{ASTERISK_HOST}:{REMOTE_SIP_PORT}"
+DEST_NUMBER = os.getenv("DEST_NUMBER", "19073750302")
+DEST_URI = f"sip:{DEST_NUMBER}@{ASTERISK_HOST}:{REMOTE_SIP_PORT}"
 
 USE_TCP = False
 FORCE_BIND_IP = None
@@ -30,14 +34,23 @@ FORCE_PUBLIC_IP = None
 
 ACTIONS = [
     ("wav", "first.wav"),
-    ("wav", "second.wav"),
-    ("wav", "name.wav"),
-    ("wav", "birthday.wav"),
+    ("wav", "name2.wav"),
+    ("wav", "birthday2.wav"),
     ("dtmf", "5408249373"),
     ("wav", "yes.wav"),
-    ("wav","reschedul.wav"),
     ("wav", "yes.wav"),
     ("wav", "yes.wav"),
+    ("wav","height.wav"),
+    ("wav","weight.wav"),
+    ("wav", "no.wav"),
+    ("wav", "no.wav"),
+    ("wav", "yes.wav"),
+    ("wav", "no.wav"),
+    ("wav", "no.wav"),
+    ("wav", "no.wav"),
+    ("wav", "no.wav"),
+    ("wav", "palmer.wav"),
+    ("wav", "no.wav"),
     ("wav", "no.wav"),
 ]
 
@@ -149,8 +162,8 @@ def make_transport(ep: pj.Endpoint, bind_ip: str) -> int:
 
 
 def configure_endpoint(ep_cfg: pj.EpConfig):
-    ep_cfg.logConfig.level = 5
-    ep_cfg.logConfig.consoleLevel = 5
+    ep_cfg.logConfig.level = 2
+    ep_cfg.logConfig.consoleLevel = 2
 
     safe_set(ep_cfg.uaConfig, "userAgent", "")
     safe_set(ep_cfg.uaConfig, "natTypeInSdp", 0)
@@ -569,7 +582,7 @@ class MyCall(pj.Call):
                 self.current_wait_merge_bridge_gap = False
 
     def _send_dtmf_digits(self, digits, expected_idx):
-        INTER_DIGIT_MS = 200  # ms between digits — increase if still doubling
+        INTER_DIGIT_MS = 500  # ms between digits — increase if still doubling
 
         try:
             self.ep.libRegisterThread(f"dtmf-{self.call_id}")

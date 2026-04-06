@@ -6,11 +6,11 @@
     <![CDATA[
 INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
 Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
-From: "Rahul" <sip:1001@10.29.32.138>;tag=[call_number]
+From: "[field0]" <sip:[field1]@[remote_ip]>;tag=[call_number]
 To: <sip:[service]@[remote_ip]:[remote_port]>
 Call-ID: [call_id]
 CSeq: 1 INVITE
-Contact: <sip:1001@[local_ip]:[local_port]>
+Contact: <sip:[field1]@[local_ip]:[local_port]>
 Max-Forwards: 70
 Subject: load test
 Content-Type: application/sdp
@@ -37,11 +37,11 @@ a=ptime:20
     <![CDATA[
 ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
 Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
-From: "Rahul" <sip:1001@10.29.32.138>;tag=[call_number]
+From: "[field0]" <sip:[field1]@[remote_ip]>;tag=[call_number]
 To: <sip:[service]@[remote_ip]:[remote_port]>[peer_tag_param]
 Call-ID: [call_id]
 CSeq: 1 ACK
-Contact: <sip:1001@[local_ip]:[local_port]>
+Contact: <sip:[field1]@[local_ip]:[local_port]>
 Max-Forwards: 70
 Content-Length: 0
 ]]>
@@ -52,12 +52,12 @@ Content-Length: 0
     <![CDATA[
 INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
 Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
-From: "Rahul" <sip:1001@10.29.32.138>;tag=[call_number]
+From: "[field0]" <sip:[field1]@[remote_ip]>;tag=[call_number]
 To: <sip:[service]@[remote_ip]:[remote_port]>
 Call-ID: [call_id]
 CSeq: 2 INVITE
-Contact: <sip:1001@[local_ip]:[local_port]>
-[authentication username=1001 password=b0f1306769fe67fec2b2e0941e34d962]
+Contact: <sip:[field1]@[local_ip]:[local_port]>
+[authentication username=[field1] password=[field2]]
 Max-Forwards: 70
 Subject: load test
 Content-Type: application/sdp
@@ -85,11 +85,11 @@ a=ptime:20
     <![CDATA[
 ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
 Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
-From: "Rahul" <sip:1001@10.29.32.138>;tag=[call_number]
+From: "[field0]" <sip:[field1]@[remote_ip]>;tag=[call_number]
 To: <sip:[service]@[remote_ip]:[remote_port]>[peer_tag_param]
 Call-ID: [call_id]
 CSeq: 2 ACK
-Contact: <sip:1001@[local_ip]:[local_port]>
+Contact: <sip:[field1]@[local_ip]:[local_port]>
 Max-Forwards: 70
 Content-Length: 0
 ]]>
@@ -129,11 +129,11 @@ Content-Length: 0
     <![CDATA[
 BYE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
 Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
-From: "Rahul" <sip:1001@10.29.32.138>;tag=[call_number]
+From: "[field0]" <sip:[field1]@[remote_ip]>;tag=[call_number]
 To: <sip:[service]@[remote_ip]:[remote_port]>[peer_tag_param]
 Call-ID: [call_id]
 CSeq: 3 BYE
-Contact: <sip:1001@[local_ip]:[local_port]>
+Contact: <sip:[field1]@[local_ip]:[local_port]>
 Max-Forwards: 70
 Content-Length: 0
 ]]>
