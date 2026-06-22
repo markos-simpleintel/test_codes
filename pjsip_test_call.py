@@ -27,34 +27,34 @@ CALLER_DISPLAY = os.getenv("CALLER_DISPLAY", "Rahul")
 
 DEST_NUMBER = os.getenv("DEST_NUMBER", "19073750302")
 DEST_URI = f"sip:{DEST_NUMBER}@{ASTERISK_HOST}:{REMOTE_SIP_PORT}"
+INPUT_AUDIO_DIR = Path(os.getenv("INPUT_AUDIO_DIR", "input_audios"))
 
 USE_TCP = False
 FORCE_BIND_IP = None
 FORCE_PUBLIC_IP = None
 
 ACTIONS = [
-    ("wav", "first.wav"),
-    ("wav", "name2.wav"),
-    ("wav", "birthday2.wav"),
+    ("wav", str(INPUT_AUDIO_DIR / "first.wav")),
+    ("wav", str(INPUT_AUDIO_DIR / "name2.wav")),
+    ("wav", str(INPUT_AUDIO_DIR / "birthday2.wav")),
     ("dtmf", "5408249373"),
-    ("wav", "yes.wav"),
-    ("wav", "yes.wav"),
-    ("wav", "yes.wav"),
-    ("wav","height.wav"),
-    ("wav","weight.wav"),
-    ("wav", "no.wav"),
-    ("wav", "no.wav"),
-    ("wav", "yes.wav"),
-    ("wav", "no.wav"),
-    ("wav", "no.wav"),
-    ("wav", "no.wav"),
-    ("wav", "no.wav"),
-    ("wav", "palmer.wav"),
-    ("wav", "no.wav"),
-    ("wav", "no.wav"),
+    ("wav", str(INPUT_AUDIO_DIR / "yes.wav")),
+    ("wav", str(INPUT_AUDIO_DIR / "yes.wav")),
+    ("wav", str(INPUT_AUDIO_DIR / "yes.wav")),
+    ("wav", str(INPUT_AUDIO_DIR / "height.wav")),
+    ("wav", str(INPUT_AUDIO_DIR / "weight.wav")),
+    ("wav", str(INPUT_AUDIO_DIR / "no.wav")),
+    ("wav", str(INPUT_AUDIO_DIR / "no.wav")),
+    ("wav", str(INPUT_AUDIO_DIR / "no.wav")),
+    ("wav", str(INPUT_AUDIO_DIR / "no.wav")),
+    ("wav", str(INPUT_AUDIO_DIR / "no.wav")),
+    ("wav", str(INPUT_AUDIO_DIR / "no.wav")),
+    ("wav", str(INPUT_AUDIO_DIR / "no.wav")),
+    ("wav", str(INPUT_AUDIO_DIR / "no.wav")),
+    ("wav", str(INPUT_AUDIO_DIR / "no.wav")),
 ]
 
-SILENCE_PAD_WAV = "silence_60s.wav"
+SILENCE_PAD_WAV = str(INPUT_AUDIO_DIR / "silence_60s.wav")
 CALLS_OUTPUT_DIR = "call_recordings"
 
 NUM_CALLS = 1
