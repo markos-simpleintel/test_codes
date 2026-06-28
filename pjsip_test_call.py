@@ -34,7 +34,6 @@ FORCE_BIND_IP = None
 FORCE_PUBLIC_IP = None
 
 ACTIONS = [
-    ("wav", str(INPUT_AUDIO_DIR / "first.wav")),
     ("wav", str(INPUT_AUDIO_DIR / "name2.wav")),
     ("wav", str(INPUT_AUDIO_DIR / "birthday2.wav")),
     ("dtmf", "5408249373"),
@@ -55,7 +54,6 @@ ACTIONS = [
 ]
 
 SILENCE_PAD_WAV = str(INPUT_AUDIO_DIR / "silence_60s.wav")
-CALLS_OUTPUT_DIR = "call_recordings"
 
 NUM_CALLS = 1
 CALL_START_GAP_MS = 200
@@ -85,6 +83,44 @@ def safe_set(obj, attr, value):
     except Exception as e:
         print(f"*** could not set {obj.__class__.__name__}.{attr}: {e}")
         return False
+
+
+def describe_pj_error(err):
+    fields = [f"repr={err!r}"]
+    for attr in ("status", "reason", "title", "srcFile", "srcLine"):
+        try:
+            value = getattr(err, attr)
+        except Exception:
+            continue
+        if value not in (None, ""):
+            fields.append(f"{attr}={value}")
+    return " ".join(fields)
+
+
+def describe_media(label, media):
+    if media is None:
+        return f"{label}: <None>"
+
+    fields = [f"{label}: class={media.__class__.__name__}"]
+
+    try:
+        fields.append(f"port_id={media.getPortId()}")
+    except Exception as e:
+        fields.append(f"port_id=<error {e!r}>")
+
+    try:
+        info = media.getPortInfo()
+        for attr in ("portId", "name", "clockRate", "channelCount", "samplesPerFrame"):
+            try:
+                value = getattr(info, attr)
+            except Exception:
+                continue
+            if value not in (None, ""):
+                fields.append(f"{attr}={value}")
+    except Exception as e:
+        fields.append(f"port_info=<error {e!r}>")
+
+    return " ".join(fields)
 
 
 def detect_local_ip_for_remote(remote_host: str, remote_port: int) -> str:
@@ -249,12 +285,6 @@ def is_active_audio_media(media_desc) -> bool:
     return True
 
 
-def build_recording_path(kind: str, call_id: int) -> str:
-    out_dir = Path(CALLS_OUTPUT_DIR)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    return str(out_dir / f"{kind}_{call_id:02d}.wav")
-
-
 class MyAccount(pj.Account):
     def __init__(self):
         super().__init__()
@@ -270,13 +300,9 @@ class FilePlayer(pj.AudioMediaPlayer):
     def start_into(self, call_audio):
         self.owner.log(f"starting playback: {self.wav_path}")
         self.createPlayer(self.wav_path, pj.PJMEDIA_FILE_NO_LOOP)
+        self.owner.log(describe_media("wav_player_before_startTransmit", self))
+        self.owner.log(describe_media("call_audio_before_startTransmit", call_audio))
         self.startTransmit(call_audio)
-
-        if self.owner.mixed_recorder is not None:
-            try:
-                self.startTransmit(self.owner.mixed_recorder)
-            except pj.Error as e:
-                self.owner.log(f"failed to feed mixed recorder from {self.wav_path}: {e}")
 
     def onEof2(self):
         self.owner.log(f"local WAV finished: {self.wav_path}")
@@ -336,17 +362,15 @@ class RemoteTap(pj.AudioMediaPort):
 
 
 class MyCall(pj.Call):
-    def __init__(self, ep, acc, call_id, dst_uri, actions, mixed_recording, silence_wav):
+    def __init__(self, ep, acc, call_id, dst_uri, actions, silence_wav):
         super().__init__(acc)
         self.ep = ep
         self.call_id = call_id
         self.dst_uri = dst_uri
         self.actions = list(actions)
-        self.mixed_recording = mixed_recording
         self.silence_wav = silence_wav
 
         self.call_audio = None
-        self.mixed_recorder = None
         self.player = None
         self.keepalive_player = None
         self.remote_tap = None
@@ -391,7 +415,6 @@ class MyCall(pj.Call):
             with self._lock:
                 self.call_audio = None
                 self.player = None
-                self.mixed_recorder = None
                 self.remote_tap = None
                 self._waiting_for_remote = False
                 self.current_wait_requires_prompt_start = False
@@ -415,15 +438,6 @@ class MyCall(pj.Call):
                 self.media_ready = True
 
             self.log("media is ready")
-
-            try:
-                if self.mixed_recorder is None:
-                    self.mixed_recorder = pj.AudioMediaRecorder()
-                    self.mixed_recorder.createRecorder(self.mixed_recording)
-                    self.call_audio.startTransmit(self.mixed_recorder)
-                    self.log(f"mixed recording started: {self.mixed_recording}")
-            except pj.Error as e:
-                self.log(f"mixed recorder setup failed: {e}")
 
             try:
                 if self.remote_tap is None:
@@ -626,7 +640,12 @@ class MyCall(pj.Call):
             try:
                 player.start_into(call_audio)
             except pj.Error as e:
-                self.log(f"playback start failed for {action_value}: {e}")
+                self.log(f"playback start failed for {action_value}: {describe_pj_error(e)}")
+                self.log(describe_media("failed_wav_player", player))
+                self.log(describe_media("failed_call_audio", call_audio))
+                with self._lock:
+                    if self.player is player:
+                        self.player = None
                 self.start_rtp_keepalive()
             return
 
@@ -761,7 +780,6 @@ def main():
                 call_id=call_id,
                 dst_uri=DEST_URI,
                 actions=ACTIONS,
-                mixed_recording=build_recording_path("mixed", call_id),
                 silence_wav=SILENCE_PAD_WAV,
             )
             calls.append(call)

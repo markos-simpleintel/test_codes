@@ -9,10 +9,13 @@ PJSUA_MAX_CALLS="${PJSUA_MAX_CALLS:-64}"
 PJSUA_MAX_RECORDERS="${PJSUA_MAX_RECORDERS:-64}"
 PJSUA_MAX_PLAYERS="${PJSUA_MAX_PLAYERS:-128}"
 PJSUA_MAX_CONF_PORTS="${PJSUA_MAX_CONF_PORTS:-256}"
+PJSUA2_CLEAN_BUILD="${PJSUA2_CLEAN_BUILD:-0}"
+PJSUA2_FIX_VENV_OWNER="${PJSUA2_FIX_VENV_OWNER:-1}"
 BUILD_ROOT="${PJSUA2_BUILD_ROOT:-$HOME/.cache/pjsua2-build}"
 SRC_DIR="$BUILD_ROOT/pjproject-$PJSIP_VERSION"
 TARBALL="$BUILD_ROOT/pjproject-$PJSIP_VERSION.tar.gz"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_DIR="${PJSUA2_VENV_DIR:-$PROJECT_DIR/venv}"
 
 log() {
   printf '\n==> %s\n' "$*"
@@ -42,8 +45,8 @@ install_apt_packages() {
   fi
 
   log "Installing build dependencies"
-  sudo apt-get update
-  sudo apt-get install -y \
+  sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get update
+  sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get install -y \
     build-essential \
     ca-certificates \
     libasound2-dev \
@@ -56,6 +59,48 @@ install_apt_packages() {
     swig \
     tar \
     wget
+}
+
+ensure_project_venv() {
+  log "Preparing project virtualenv"
+
+  if [[ -n "${VIRTUAL_ENV:-}" && "$VIRTUAL_ENV" != "$VENV_DIR" ]]; then
+    printf 'Switching from active virtualenv %s to project virtualenv %s\n' "$VIRTUAL_ENV" "$VENV_DIR"
+  fi
+
+  if [[ ! -d "$VENV_DIR" ]]; then
+    python3 -m venv "$VENV_DIR"
+    printf 'Created virtualenv: %s\n' "$VENV_DIR"
+  else
+    printf 'Using existing virtualenv: %s\n' "$VENV_DIR"
+  fi
+
+  # Activate for the rest of this script. This does not persist after the script exits.
+  # Run `source venv/bin/activate` manually if you want the parent shell activated too.
+  # shellcheck disable=SC1091
+  source "$VENV_DIR/bin/activate"
+
+  if ! python3 -c 'import os, sys, sysconfig; p=sysconfig.get_paths()["purelib"]; os.makedirs(p, exist_ok=True); sys.exit(0 if os.access(p, os.W_OK) else 1)'; then
+    if [[ "$PJSUA2_FIX_VENV_OWNER" != "1" ]]; then
+      die "Virtualenv is not writable by $(id -un): $VENV_DIR. Fix it with: sudo chown -R $(id -u):$(id -g) '$VENV_DIR'"
+    fi
+
+    if [[ "$VENV_DIR" != "$PROJECT_DIR"/venv && "$VENV_DIR" != "$PROJECT_DIR"/venv/* ]]; then
+      die "Refusing to auto-fix ownership outside the project venv: $VENV_DIR"
+    fi
+
+    if [[ ! -f "$VENV_DIR/pyvenv.cfg" ]]; then
+      die "Refusing to auto-fix ownership because this does not look like a Python venv: $VENV_DIR"
+    fi
+
+    printf 'Virtualenv is not writable by %s; fixing ownership with sudo.\n' "$(id -un)"
+    sudo chown -R "$(id -u):$(id -g)" "$VENV_DIR"
+    chmod -R u+rwX "$VENV_DIR"
+
+    if ! python3 -c 'import os, sys, sysconfig; p=sysconfig.get_paths()["purelib"]; sys.exit(0 if os.access(p, os.W_OK) else 1)'; then
+      die "Virtualenv is still not writable after ownership fix: $VENV_DIR"
+    fi
+  fi
 }
 
 prepare_python_build_env() {
@@ -139,9 +184,11 @@ build_pjsua2() {
   log "Configuring and building PJSIP/PJSUA2"
   cd "$SRC_DIR"
 
-  if [[ -f Makefile ]]; then
+  if [[ "$PJSUA2_CLEAN_BUILD" == "1" && -f Makefile ]]; then
     log "Cleaning previous PJSIP build output"
     make clean || true
+  elif [[ -f Makefile ]]; then
+    log "Skipping full clean; set PJSUA2_CLEAN_BUILD=1 to force a clean rebuild"
   fi
 
   ./configure CFLAGS="-fPIC -O2"
@@ -194,22 +241,7 @@ check_project_files() {
   cd "$PROJECT_DIR"
 
   if [[ ! -f ".env" ]]; then
-    cat > .env.example <<'ENV'
-# Copy this to .env and fill in the real PBX values.
-ASTERISK_HOST=10.29.32.138
-REMOTE_SIP_PORT=5060
-LOCAL_SIP_PORT=5062
-MEDIA_RTP_PORT=4000
-MEDIA_RTP_PORT_RANGE=400
-
-CALLER_USER=1001
-CALLER_PASS=
-CALLER_DISPLAY=Rahul
-
-DEST_NUMBER=19073750302
-INPUT_AUDIO_DIR=input_audios
-ENV
-    printf 'No .env found. Created .env.example; copy it to .env and fill in the real values.\n'
+    printf 'No .env found. Create it manually before running pjsip_test_call.py.\n'
   else
     printf '.env found.\n'
   fi
@@ -234,6 +266,7 @@ ENV
 main() {
   need_command python3
   install_apt_packages
+  ensure_project_venv
   prepare_python_build_env
   download_pjsip
   write_pjsip_config_site
