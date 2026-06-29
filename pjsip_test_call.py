@@ -1,4 +1,4 @@
-from sip_load_tester.runner import main
+from runner import main
 
 
 if __name__ == "__main__":
