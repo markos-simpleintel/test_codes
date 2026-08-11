@@ -281,3 +281,65 @@ project folder and be **8000 Hz, mono, 16-bit PCM**.
 - [ ] All required `.wav` files present (8000 Hz mono 16-bit)
 - [ ] PBX is reachable on the network
 - [ ] `python3 pjsip_test_call.py` produces a file in `call_recordings/`
+
+---
+
+## Client acceptance workflow (recommended)
+
+The `pjsip_test_call.py` entry point enforces the requested order and creates evidence
+under `test_results/`. Run all commands from the project directory in Ubuntu/WSL.
+
+### 1. Prepare and verify (does not place a call)
+
+```bash
+cp .env.example .env
+# Fill in the real SIP and AMI credentials, then add the WAV files to input_audios/.
+python3 pjsip_test_call.py preflight
+```
+
+Do not continue until the output says `PRE-FLIGHT PASSED`. AMI access and transfer
+detection are mandatory: they let the automation detect a GSR transfer path and hang up
+before a live-agent bridge. Ask the PBX owner for the exact GSR trunk/channel token and
+include it in the comma-separated `AMI_TRANSFER_DIAL_TARGETS` value.
+
+### 2. Run the single sample
+
+```bash
+python3 pjsip_test_call.py single
+```
+
+The script captures caller, connected, and destination values from actual SIP/AMI events
+and saves them in the single-test JSON report. It never invents or asks the tester to type
+phone numbers. Review the `phone_identity_observations` section, compare it with the three
+UIs, then send the observed values to IA and wait for confirmation. A detected GSR
+transfer makes the test fail.
+
+### 3. Run exactly two concurrent tests after IA confirms
+
+```bash
+python3 pjsip_test_call.py concurrent --ia-confirmed
+```
+
+Without `--ia-confirmed`, or without a passing single-test report containing actual
+identity observations, the script refuses to start the concurrent calls.
+
+### 4. Azure latency review
+
+Give Nikita and Brandon the generated `*_concurrent_latency.csv`, the concurrent JSON
+report, and the `.log` file from `test_results/`. The CSV uses UTC timestamps and elapsed
+milliseconds for call start, connection, media-ready, playback, response, transfer, and
+disconnect events, separated by call ID.
+
+### 5. Progressive capacity testing after IA approval
+
+Run one approved level at a time. Stop increasing when failures or unacceptable latency
+appear:
+
+```bash
+python3 pjsip_test_call.py load --calls 5 --ia-confirmed
+python3 pjsip_test_call.py load --calls 10 --ia-confirmed
+python3 pjsip_test_call.py load --calls 15 --ia-confirmed
+```
+
+The accepted range is 2–100 calls. Each level receives separate evidence under
+`test_results/`; a capacity limit must be based on those results, not an estimate.

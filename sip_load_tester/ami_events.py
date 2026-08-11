@@ -1,12 +1,16 @@
+import json
 import socket
 import threading
 import time
 
 from .config import (
     AMI_DETECT_TRANSFER,
+    AMI_JANE_MATCH,
+    AMI_ORBITI_MATCH,
+    AMI_TRANSFER_MATCH,
     AMI_TRANSFER_CONTEXT_PREFIX_LIST,
     AMI_TRANSFER_DIAL_TARGET_LIST,
-    AMI_USE_AGI_STREAM_EVENTS,
+    CALLER_USER,
 )
 class AmiReadyEvents:
     def __init__(self, host, port, username, secret, ready_event_name, caller_filter="", trace=False):
@@ -32,6 +36,7 @@ class AmiReadyEvents:
         self._channel_sequence = 0
         self._channel_events = []
         self._claimed_channel_keys = set()
+        self._identity_linkedids = set()
         self._login_response = None
         self._running = False
 
@@ -260,6 +265,8 @@ class AmiReadyEvents:
         if not event:
             return
 
+        self._log_test_call_identity(msg)
+
         if self.trace:
             print(f"*** AMI event: {self._summarize_event(msg)}")
 
@@ -295,6 +302,56 @@ class AmiReadyEvents:
         event_name = msg.get("Event", "")
         return event_name.lower() == "newchannel"
 
+    def _log_test_call_identity(self, msg):
+        event_name = msg.get("Event", "")
+        if event_name.lower() not in {
+            "newchannel", "newcallerid", "newconnectedline", "dialbegin", "newexten"
+        }:
+            return
+
+        linkedid = msg.get("Linkedid", "") or msg.get("Uniqueid", "")
+        expected_caller = self.caller_filter or CALLER_USER
+        is_initial_test_event = self._matches_expected_caller(msg, expected_caller)
+        if is_initial_test_event and linkedid:
+            self._identity_linkedids.add(linkedid)
+        if not is_initial_test_event and linkedid not in self._identity_linkedids:
+            return
+
+        searchable = " ".join(
+            msg.get(field, "")
+            for field in (
+                "Context", "Channel", "DestChannel", "Application", "AppData",
+                "Exten", "DialString",
+            )
+        ).lower()
+        stage = "AMI/unknown"
+        for label, tokens in (
+            ("Orbiti", AMI_ORBITI_MATCH),
+            ("Jane", AMI_JANE_MATCH),
+            ("Transfer", AMI_TRANSFER_MATCH),
+        ):
+            if any(token.lower() in searchable for token in tokens):
+                stage = label
+                break
+
+        record = {
+            "stage": stage,
+            "event": event_name,
+            "caller_number": msg.get("CallerIDNum") or msg.get("Caller", ""),
+            "caller_name": msg.get("CallerIDName", ""),
+            "connected_number": msg.get("ConnectedLineNum", ""),
+            "destination_number": (
+                msg.get("DialString") or msg.get("Exten") or msg.get("AppData", "")
+            ),
+            "context": msg.get("Context", ""),
+            "channel": msg.get("Channel", ""),
+            "destination_channel": msg.get("DestChannel", ""),
+            "uniqueid": msg.get("Uniqueid", ""),
+            "linkedid": msg.get("Linkedid", ""),
+            "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        print("[TEST CALL] " + json.dumps(record, sort_keys=True))
+
     def _channel_key(self, msg):
         return msg.get("Uniqueid") or msg.get("Channel") or msg.get("Linkedid")
 
@@ -321,11 +378,6 @@ class AmiReadyEvents:
         if event_name == self.ready_event_name:
             return self._matches_caller_filter(msg)
 
-        if AMI_USE_AGI_STREAM_EVENTS and event_name_lower == "agiexecend":
-            command = msg.get("Command", "")
-            if command.upper().startswith("STREAM FILE "):
-                return self._matches_caller_filter(msg)
-
         return False
 
     def _matches_transfer_event(self, msg):
@@ -340,11 +392,11 @@ class AmiReadyEvents:
             application = msg.get("Application", "")
             app_data = msg.get("AppData", "")
 
-            if any(context.startswith(prefix) for prefix in AMI_TRANSFER_CONTEXT_PREFIX_LIST):
+            if any(context.lower().startswith(prefix.lower()) for prefix in AMI_TRANSFER_CONTEXT_PREFIX_LIST):
                 return self._matches_caller_filter(msg)
 
             if application.lower() == "dial":
-                if any(target in app_data for target in AMI_TRANSFER_DIAL_TARGET_LIST):
+                if any(target.lower() in app_data.lower() for target in AMI_TRANSFER_DIAL_TARGET_LIST):
                     return self._matches_caller_filter(msg)
 
         if event_name_lower == "dialbegin":
@@ -352,7 +404,7 @@ class AmiReadyEvents:
                 msg.get(field, "")
                 for field in ("DialString", "DestChannel", "Destination", "Channel")
             )
-            if any(target in dial_string for target in AMI_TRANSFER_DIAL_TARGET_LIST):
+            if any(target.lower() in dial_string.lower() for target in AMI_TRANSFER_DIAL_TARGET_LIST):
                 return self._matches_caller_filter(msg)
 
         return False

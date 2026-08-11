@@ -1,4 +1,5 @@
 import gc
+import json
 import time
 
 import pjsua2 as pj
@@ -16,9 +17,10 @@ from .config import (
     AMI_TRACE_EVENTS,
     AMI_TRANSFER_CONTEXT_PREFIX_LIST,
     AMI_TRANSFER_DIAL_TARGET_LIST,
-    AMI_USE_AGI_STREAM_EVENTS,
     AMI_USER,
+    CALLER_USER,
     CALL_START_GAP_MS,
+    DEST_NUMBER,
     DEST_URI,
     HANGUP_ON_AMI_TRANSFER,
     MAX_CALL_SECONDS,
@@ -50,7 +52,6 @@ def main():
                 f"ready_event={AMI_READY_EVENT_NAME} "
                 f"caller_filter={AMI_EVENT_CALLER or '<none>'} "
                 f"trace={AMI_TRACE_EVENTS} "
-                f"agi_stream_events={AMI_USE_AGI_STREAM_EVENTS} "
                 f"detect_transfer={AMI_DETECT_TRANSFER} "
                 f"transfer_context_prefixes={AMI_TRANSFER_CONTEXT_PREFIX_LIST} "
                 f"transfer_dial_targets={AMI_TRANSFER_DIAL_TARGET_LIST} "
@@ -70,7 +71,6 @@ def main():
                 print(
                     f"*** AMI ready-event listener started: {AMI_HOST}:{AMI_PORT} "
                     f"custom_event={AMI_READY_EVENT_NAME} "
-                    f"agi_stream_events={AMI_USE_AGI_STREAM_EVENTS} "
                     f"detect_transfer={AMI_DETECT_TRANSFER}"
                 )
             except Exception as e:
@@ -100,6 +100,19 @@ def main():
         acc.create(acfg)
 
         print("*** account created without registration")
+        print(
+            "[TEST CALL] "
+            + json.dumps(
+                {
+                    "stage": "PBX/test",
+                    "event": "call_configuration",
+                    "caller_number": CALLER_USER,
+                    "destination_number": DEST_NUMBER,
+                    "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                },
+                sort_keys=True,
+            )
+        )
         print(f"*** starting {NUM_CALLS} direct INVITE call(s)")
 
         for call_id in range(1, NUM_CALLS + 1):
@@ -113,6 +126,20 @@ def main():
                 ami_ready_events=ami_ready_events,
             )
             calls.append(call)
+            print(
+                "[TEST CALL] "
+                + json.dumps(
+                    {
+                        "stage": "PBX/test",
+                        "event": "call_start",
+                        "call_id": call_id,
+                        "caller_number": CALLER_USER,
+                        "destination_number": DEST_NUMBER,
+                        "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    },
+                    sort_keys=True,
+                )
+            )
             call.log(f"starting direct INVITE call to {DEST_URI}")
             call.start()
 
