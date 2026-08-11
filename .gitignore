@@ -1,4 +1,5 @@
 .env
 call_recordings/
+test_results/
 __pycache__/
 *.pyc
