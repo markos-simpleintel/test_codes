@@ -3,38 +3,74 @@ import time
 
 import pjsua2 as pj
 
-from .ami_events import AmiReadyEvents
-from .call_session import MyAccount, MyCall
-from .config import (
-    ACTIONS,
-    AMI_DETECT_TRANSFER,
-    AMI_EVENT_CALLER,
-    AMI_HOST,
-    AMI_PORT,
-    AMI_READY_EVENT_NAME,
-    AMI_SECRET,
-    AMI_TRACE_EVENTS,
-    AMI_TRANSFER_CONTEXT_PREFIX_LIST,
-    AMI_TRANSFER_DIAL_TARGET_LIST,
-    AMI_USE_AGI_STREAM_EVENTS,
-    AMI_USER,
-    CALL_START_GAP_MS,
-    DEST_URI,
-    HANGUP_ON_AMI_TRANSFER,
-    MAX_CALL_SECONDS,
-    NUM_CALLS,
-    SILENCE_PAD_WAV,
-    USE_AMI_READY_EVENTS,
-    masked_secret,
-)
-from .pjsip_helpers import (
-    build_account_config,
-    configure_codecs,
-    configure_endpoint,
-    get_bind_ip,
-    make_transport,
-    print_transport_info,
-)
+try:
+    from .ami_events import AmiReadyEvents
+    from .call_session import MyAccount, MyCall
+    from .config import (
+        ACTIONS,
+        AMI_DETECT_TRANSFER,
+        AMI_EVENT_CALLER,
+        AMI_HOST,
+        AMI_PORT,
+        AMI_READY_EVENT_NAME,
+        AMI_SECRET,
+        AMI_TRACE_EVENTS,
+        AMI_TRANSFER_CONTEXT_PREFIX_LIST,
+        AMI_TRANSFER_DIAL_TARGET_LIST,
+        AMI_USE_AGI_STREAM_EVENTS,
+        AMI_USER,
+        CALL_START_GAP_MS,
+        DEST_URI,
+        HANGUP_ON_AMI_TRANSFER,
+        MAX_CALL_SECONDS,
+        NUM_CALLS,
+        SILENCE_PAD_WAV,
+        USE_AMI_READY_EVENTS,
+        masked_secret,
+    )
+    from .pjsip_helpers import (
+        build_account_config,
+        configure_codecs,
+        configure_endpoint,
+        get_bind_ip,
+        make_transport,
+        print_transport_info,
+    )
+except ImportError:
+    from ami_events import AmiReadyEvents
+    from call_session import MyAccount, MyCall
+    from config import (
+        ACTIONS,
+        AMI_DETECT_TRANSFER,
+        AMI_EVENT_CALLER,
+        AMI_HOST,
+        AMI_PORT,
+        AMI_READY_EVENT_NAME,
+        AMI_SECRET,
+        AMI_TRACE_EVENTS,
+        AMI_TRANSFER_CONTEXT_PREFIX_LIST,
+        AMI_TRANSFER_DIAL_TARGET_LIST,
+        AMI_USE_AGI_STREAM_EVENTS,
+        AMI_USER,
+        CALL_START_GAP_MS,
+        DEST_URI,
+        HANGUP_ON_AMI_TRANSFER,
+        MAX_CALL_SECONDS,
+        NUM_CALLS,
+        SILENCE_PAD_WAV,
+        USE_AMI_READY_EVENTS,
+        masked_secret,
+    )
+    from pjsip_helpers import (
+        build_account_config,
+        configure_codecs,
+        configure_endpoint,
+        get_bind_ip,
+        make_transport,
+        print_transport_info,
+    )
+
+
 def main():
     ep = pj.Endpoint()
     acc = None
@@ -180,6 +216,8 @@ def main():
 
         try:
             ep.libDestroy()
+        except KeyboardInterrupt:
+            print("*** libDestroy interrupted by user")
         except Exception as e:
             print(f"*** libDestroy warning: {e}")
 

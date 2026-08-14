@@ -259,6 +259,8 @@ class MyCall(pj.Call):
         if HANGUP_ON_AMI_TRANSFER:
             self.log("hanging up before live-agent bridge")
             self.safe_hangup()
+        else:
+            self.log("transfer detected; leaving call connected because HANGUP_ON_AMI_TRANSFER=0")
 
     def stop_current_audio(self):
         with self._lock:

@@ -231,7 +231,8 @@ class AmiReadyEvents:
                         continue
                     self._handle_message(msg)
         except Exception as e:
-            print(f"*** AMI listener stopped: {e}")
+            if not self._stop_evt.is_set():
+                print(f"*** AMI listener stopped: {e}")
         finally:
             with self._cond:
                 self._running = False

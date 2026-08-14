@@ -1,22 +1,42 @@
 import socket
 import pjsua2 as pj
 
-from .config import (
-    ASTERISK_HOST,
-    CALLER_DISPLAY,
-    CALLER_PASS,
-    CALLER_USER,
-    FORCE_BIND_IP,
-    FORCE_PUBLIC_IP,
-    LOCAL_SIP_PORT,
-    MAX_CALLS_HEADROOM,
-    MEDIA_RTP_PORT,
-    MEDIA_RTP_PORT_RANGE,
-    MIN_RUNTIME_MAX_CALLS,
-    NUM_CALLS,
-    REMOTE_SIP_PORT,
-    USE_TCP,
-)
+try:
+    from .config import (
+        ASTERISK_HOST,
+        CALLER_DISPLAY,
+        CALLER_PASS,
+        CALLER_USER,
+        FORCE_BIND_IP,
+        FORCE_PUBLIC_IP,
+        LOCAL_SIP_PORT,
+        MAX_CALLS_HEADROOM,
+        MEDIA_RTP_PORT,
+        MEDIA_RTP_PORT_RANGE,
+        MIN_RUNTIME_MAX_CALLS,
+        NUM_CALLS,
+        REMOTE_SIP_PORT,
+        USE_TCP,
+    )
+except ImportError:
+    from config import (
+        ASTERISK_HOST,
+        CALLER_DISPLAY,
+        CALLER_PASS,
+        CALLER_USER,
+        FORCE_BIND_IP,
+        FORCE_PUBLIC_IP,
+        LOCAL_SIP_PORT,
+        MAX_CALLS_HEADROOM,
+        MEDIA_RTP_PORT,
+        MEDIA_RTP_PORT_RANGE,
+        MIN_RUNTIME_MAX_CALLS,
+        NUM_CALLS,
+        REMOTE_SIP_PORT,
+        USE_TCP,
+    )
+
+
 def safe_set(obj, attr, value):
     if not hasattr(obj, attr):
         return False

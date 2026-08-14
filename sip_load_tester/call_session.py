@@ -5,17 +5,32 @@ import time
 
 import pjsua2 as pj
 
-from .config import (
-    CALLER_USER,
-    HANGUP_ON_AMI_TRANSFER,
-    INITIAL_WAIT_TIMEOUT_SECS,
-    NEXT_TURN_WAIT_TIMEOUT_SECS,
-    POLL_MS,
-    POST_REDIRECT_TOTAL_SILENCE_MS,
-    SILENCE_AFTER_VOICE_MS,
-    VOICE_ENERGY_THRESHOLD,
-)
-from .pjsip_helpers import describe_media, describe_pj_error, is_active_audio_media
+try:
+    from .config import (
+        CALLER_USER,
+        HANGUP_ON_AMI_TRANSFER,
+        INITIAL_WAIT_TIMEOUT_SECS,
+        NEXT_TURN_WAIT_TIMEOUT_SECS,
+        POLL_MS,
+        POST_REDIRECT_TOTAL_SILENCE_MS,
+        SILENCE_AFTER_VOICE_MS,
+        VOICE_ENERGY_THRESHOLD,
+    )
+    from .pjsip_helpers import describe_media, describe_pj_error, is_active_audio_media
+except ImportError:
+    from config import (
+        CALLER_USER,
+        HANGUP_ON_AMI_TRANSFER,
+        INITIAL_WAIT_TIMEOUT_SECS,
+        NEXT_TURN_WAIT_TIMEOUT_SECS,
+        POLL_MS,
+        POST_REDIRECT_TOTAL_SILENCE_MS,
+        SILENCE_AFTER_VOICE_MS,
+        VOICE_ENERGY_THRESHOLD,
+    )
+    from pjsip_helpers import describe_media, describe_pj_error, is_active_audio_media
+
+
 class MyAccount(pj.Account):
     def __init__(self):
         super().__init__()
@@ -257,6 +272,8 @@ class MyCall(pj.Call):
         if HANGUP_ON_AMI_TRANSFER:
             self.log("hanging up before live-agent bridge")
             self.safe_hangup()
+        else:
+            self.log("transfer detected; leaving call connected because HANGUP_ON_AMI_TRANSFER=0")
 
     def stop_current_audio(self):
         with self._lock:

@@ -2,12 +2,22 @@ import socket
 import threading
 import time
 
-from .config import (
-    AMI_DETECT_TRANSFER,
-    AMI_TRANSFER_CONTEXT_PREFIX_LIST,
-    AMI_TRANSFER_DIAL_TARGET_LIST,
-    AMI_USE_AGI_STREAM_EVENTS,
-)
+try:
+    from .config import (
+        AMI_DETECT_TRANSFER,
+        AMI_TRANSFER_CONTEXT_PREFIX_LIST,
+        AMI_TRANSFER_DIAL_TARGET_LIST,
+        AMI_USE_AGI_STREAM_EVENTS,
+    )
+except ImportError:
+    from config import (
+        AMI_DETECT_TRANSFER,
+        AMI_TRANSFER_CONTEXT_PREFIX_LIST,
+        AMI_TRANSFER_DIAL_TARGET_LIST,
+        AMI_USE_AGI_STREAM_EVENTS,
+    )
+
+
 class AmiReadyEvents:
     def __init__(self, host, port, username, secret, ready_event_name, caller_filter="", trace=False):
         self.host = host
@@ -229,7 +239,8 @@ class AmiReadyEvents:
                         continue
                     self._handle_message(msg)
         except Exception as e:
-            print(f"*** AMI listener stopped: {e}")
+            if not self._stop_evt.is_set():
+                print(f"*** AMI listener stopped: {e}")
         finally:
             with self._cond:
                 self._running = False

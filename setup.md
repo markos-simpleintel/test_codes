@@ -147,6 +147,10 @@ AMI_SECRET=                     # AMI password
 AMI_READY_EVENT_NAME=TestReadyForInput
 AMI_EVENT_CALLER=               # optional caller/channel/uniqueid filter
 AMI_TRACE_EVENTS=0              # set 1 to log AMI event summaries
+AMI_DETECT_TRANSFER=1           # stop scripted actions once the PBX reaches transfer routing
+AMI_TRANSFER_CONTEXT_PREFIXES=transfer-,from-internal-custom
+AMI_TRANSFER_DIAL_TARGETS=@CUCM_Trunk
+HANGUP_ON_AMI_TRANSFER=1        # set 0 to leave the transferred call connected
 ```
 Ask the PBX owner for the correct `CALLER_USER`, `CALLER_PASS`, and `DEST_NUMBER` —
 they must match accounts in the PBX's `pjsip.conf`.
