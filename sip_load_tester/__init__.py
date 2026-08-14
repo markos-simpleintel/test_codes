@@ -1,1 +1,0 @@
-"""SIP load tester package."""
