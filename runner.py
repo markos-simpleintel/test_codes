@@ -35,6 +35,7 @@ from pjsip_helpers import (
     make_transport,
     print_transport_info,
 )
+from run_logging import setup_run_logging
 
 
 def main():
@@ -188,6 +189,13 @@ def main():
             print(f"*** libDestroy warning: {e}")
 
 
+def run():
+    with setup_run_logging() as run_log:
+        if run_log.path:
+            print(f"*** runner log file: {run_log.path}")
+        main()
+
+
 if __name__ == "__main__":
-    main()
+    run()
 
