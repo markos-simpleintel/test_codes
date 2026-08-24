@@ -309,10 +309,16 @@ def run_one(n, args, outdir):
     chan.start()
     time.sleep(1.0)
 
+    # runner.py's own entry point wraps main() in the file logger; calling
+    # main() directly skips it and loses the per-call detail, which is where
+    # the reason a call ended actually shows up.
+    os.environ["RUNNER_LOG_FILE"] = str(outdir / f"{args.label}-{n}calls.runner.log")
+    from run_logging import setup_run_logging
     import runner
     t0 = time.time()
     try:
-        runner.main()
+        with setup_run_logging():
+            runner.main()
     finally:
         wall = time.time() - t0
         cpu.stop()
@@ -351,7 +357,7 @@ def run_one(n, args, outdir):
     print(text)
     with open(f"{stem}.txt", "w", encoding="utf-8") as f:
         f.write(text)
-    print(f"  wrote {stem}.{{txt,json,turns.csv,cpu.csv,events.ndjson}}\n")
+    print(f"  wrote {stem}.{{txt,json,turns.csv,cpu.csv,events.ndjson,runner.log}}\n")
     return report
 
 

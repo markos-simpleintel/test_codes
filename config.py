@@ -88,9 +88,12 @@ def env_csv(name, default=""):
 # fictional, so these are well-formed, never route anywhere real, and are a
 # single grep to find afterwards.
 #
-# Set VARY_IDENTITIES=0 to send the original fixed identity instead.
+# Off by default: the dialled number has to match an existing order, so made-up
+# numbers fail patient lookup and the call is transferred out three turns in,
+# before reaching the scheduling turns worth measuring. Turn this on once test
+# orders exist for the 907555-01xx block.
 
-VARY_IDENTITIES = env_bool("VARY_IDENTITIES", True)
+VARY_IDENTITIES = env_bool("VARY_IDENTITIES", False)
 TEST_NPA_NXX = os.getenv("TEST_NPA_NXX", "907555")     # area code + exchange
 TEST_LINE_START = int(os.getenv("TEST_LINE_START", "100"))
 FIXED_DTMF = os.getenv("FIXED_DTMF", "5408249373")
