@@ -7,6 +7,8 @@ from ami_events import AmiReadyEvents
 from call_session import MyAccount, MyCall
 from config import (
     ACTIONS,
+    actions_for,
+    describe_identity,
     AMI_DETECT_TRANSFER,
     AMI_EVENT_CALLER,
     AMI_HOST,
@@ -111,12 +113,13 @@ def main():
                 acc=acc,
                 call_id=call_id,
                 dst_uri=DEST_URI,
-                actions=ACTIONS,
+                actions=actions_for(call_id),
                 silence_wav=SILENCE_PAD_WAV,
                 ami_ready_events=ami_ready_events,
             )
             calls.append(call)
-            call.log(f"starting direct INVITE call to {DEST_URI}")
+            call.log(f"starting direct INVITE call to {DEST_URI} "
+                     f"[{describe_identity(call_id)}]")
             call.start()
 
             if call_id < NUM_CALLS and CALL_START_GAP_MS > 0:

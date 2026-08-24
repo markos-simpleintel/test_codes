@@ -232,6 +232,13 @@ build_pjsua2() {
   make dep
   make -j"$(nproc)"
 
+  # Pin the linker to the tree we just built. /usr/local/lib is on the default
+  # search path, so an older pjsip install there wins otherwise - producing a
+  # binding linked against stale libraries carrying stale compile-time limits.
+  # This is silent: the build succeeds and the new config_site.h is ignored.
+  export LDFLAGS="-L$SRC_DIR/pjsip/lib -L$SRC_DIR/pjlib/lib -L$SRC_DIR/pjlib-util/lib -L$SRC_DIR/pjmedia/lib -L$SRC_DIR/pjnath/lib -L$SRC_DIR/third_party/lib${LDFLAGS:+ $LDFLAGS}"
+  log "Pinned LDFLAGS to the freshly built libraries"
+
   log "Building Python pjsua2 bindings"
   patch_swig_python_build
   cd "$SRC_DIR/pjsip-apps/src/swig"

@@ -45,9 +45,12 @@ ACTIONS = [
 
 SILENCE_PAD_WAV = str(INPUT_AUDIO_DIR / "silence_60s.wav")
 
-NUM_CALLS = 1
-CALL_START_GAP_MS = 200
-MAX_CALL_SECONDS = 1800
+
+# setup.md documents these as .env settings, so read them from there. They were
+# hardcoded, which meant NUM_CALLS=40 in .env silently placed one call.
+NUM_CALLS = int(os.getenv("NUM_CALLS", "1"))
+CALL_START_GAP_MS = int(os.getenv("CALL_START_GAP_MS", "200"))
+MAX_CALL_SECONDS = int(os.getenv("MAX_CALL_SECONDS", "1800"))
 
 MAX_CALLS_HEADROOM = 4
 MIN_RUNTIME_MAX_CALLS = 8
@@ -71,6 +74,84 @@ def env_bool(name, default=False):
 def env_csv(name, default=""):
     value = os.getenv(name, default)
     return tuple(part.strip() for part in value.split(",") if part.strip())
+
+
+# --- per-call identities -----------------------------------------------------
+#
+# Every call playing the same name, date of birth and number means N concurrent
+# calls are one patient. Against a scheduler that is not a load test - it is N
+# operations contending for a single record, which can look like slowness that
+# real callers would never produce.
+#
+# The DTMF field is dialled digits, so it has to stay a valid 10-digit number or
+# the PBX normalizes it away. 555-01xx is the range reserved as permanently
+# fictional, so these are well-formed, never route anywhere real, and are a
+# single grep to find afterwards.
+#
+# Set VARY_IDENTITIES=0 to send the original fixed identity instead.
+
+VARY_IDENTITIES = env_bool("VARY_IDENTITIES", True)
+TEST_NPA_NXX = os.getenv("TEST_NPA_NXX", "907555")     # area code + exchange
+TEST_LINE_START = int(os.getenv("TEST_LINE_START", "100"))
+FIXED_DTMF = os.getenv("FIXED_DTMF", "5408249373")
+
+
+def test_phone_for(call_id):
+    """A valid 10-digit number in the reserved fictional block."""
+    line = (TEST_LINE_START + call_id - 1) % 10000
+    return f"{TEST_NPA_NXX}{line:04d}"
+
+
+def _wav_pool(pattern, fallback):
+    """Every matching file, so dropping more recordings in varies the identity
+    further with no code change. Falls back to the original single file."""
+    try:
+        found = sorted(p for p in INPUT_AUDIO_DIR.glob(pattern) if p.is_file())
+    except OSError:
+        found = []
+    return [str(p) for p in found] or [str(INPUT_AUDIO_DIR / fallback)]
+
+
+NAME_WAVS = _wav_pool("name*.wav", "name2.wav")
+BIRTHDAY_WAVS = _wav_pool("birthday*.wav", "birthday2.wav")
+
+
+def identity_for(call_id):
+    if not VARY_IDENTITIES:
+        return {
+            "name_wav": str(INPUT_AUDIO_DIR / "name2.wav"),
+            "birthday_wav": str(INPUT_AUDIO_DIR / "birthday2.wav"),
+            "dtmf": FIXED_DTMF,
+        }
+    i = call_id - 1
+    return {
+        "name_wav": NAME_WAVS[i % len(NAME_WAVS)],
+        "birthday_wav": BIRTHDAY_WAVS[i % len(BIRTHDAY_WAVS)],
+        "dtmf": test_phone_for(call_id),
+    }
+
+
+def actions_for(call_id):
+    """ACTIONS with this call's identity substituted in."""
+    ident = identity_for(call_id)
+    out = []
+    for action_type, value in ACTIONS:
+        if action_type == "dtmf":
+            out.append((action_type, ident["dtmf"]))
+        elif value.endswith("name2.wav"):
+            out.append((action_type, ident["name_wav"]))
+        elif value.endswith("birthday2.wav"):
+            out.append((action_type, ident["birthday_wav"]))
+        else:
+            out.append((action_type, value))
+    return out
+
+
+def describe_identity(call_id):
+    ident = identity_for(call_id)
+    return (f"phone={ident['dtmf']} "
+            f"name={Path(ident['name_wav']).name} "
+            f"dob={Path(ident['birthday_wav']).name}")
 
 
 USE_AMI_READY_EVENTS = env_bool("USE_AMI_READY_EVENTS", False)
