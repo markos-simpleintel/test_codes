@@ -390,6 +390,26 @@ def _stall_watchdog(rec, timeout, stop_evt):
             return
 
 
+def _check_sip_port_free():
+    """A previous run still holding the SIP port fails deep inside pjsua2 as
+    'bind() error: Address already in use', which says nothing about the cause.
+    Check first and name it."""
+    import socket
+    import config
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        probe.bind(("", config.LOCAL_SIP_PORT))
+        return None
+    except OSError:
+        return (f"SIP port {config.LOCAL_SIP_PORT} is already in use - a previous "
+                f"run is probably still alive.\n"
+                f"    ss -lunp | grep {config.LOCAL_SIP_PORT}\n"
+                f"    pkill -9 -f evaluate.py; pkill -9 -f runner.py")
+    finally:
+        probe.close()
+
+
 def run_one(n, args, outdir):
     from metrics import RunMetrics
     import metrics as metrics_mod
@@ -501,6 +521,10 @@ def main():
 
     outdir = Path(args.out)
     outdir.mkdir(parents=True, exist_ok=True)
+
+    busy = _check_sip_port_free()
+    if busy:
+        sys.exit(f"\nERROR: {busy}\n")
 
     levels = [int(x) for x in str(args.calls).split(",") if x.strip()]
     if len(levels) > 1:
