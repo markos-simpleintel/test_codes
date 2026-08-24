@@ -182,9 +182,18 @@ def main():
             except Exception:                               # noqa: BLE001
                 pass
 
-        for call in calls:
-            if not call.disconnected:
-                call.safe_hangup()
+        # Hanging up many calls in a tight loop deadlocks PJSUA's global mutex -
+        # every hangup() then blocks for its full 2s timeout and reports
+        # "possibly system has deadlocked", so forty calls cost 80+ seconds and
+        # the teardown looks hung. A small gap lets pjsua's worker threads take
+        # the mutex between calls.
+        pending = [c for c in calls if not c.disconnected]
+        if pending:
+            print(f"*** hanging up {len(pending)} remaining call(s)")
+        for i, call in enumerate(pending):
+            call.safe_hangup()
+            if i < len(pending) - 1:
+                time.sleep(0.05)
 
         wait_start = time.time()
         while time.time() - wait_start < 5:
