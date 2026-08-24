@@ -53,7 +53,7 @@ class CpuSampler(threading.Thread):
     """Samples per-process CPU into groups. Percentages are per-core, matching
     top: 100 means one core fully used."""
 
-    def __init__(self, interval=0.5, groups=None):
+    def __init__(self, interval=0.5, groups=None, stream_path=None):
         super().__init__(daemon=True)
         self.interval = interval
         self.groups = groups or DEFAULT_GROUPS
@@ -62,6 +62,37 @@ class CpuSampler(threading.Thread):
         self._stop = threading.Event()
         self.t0 = time.time()
         self.error = None
+        # Samples go to disk as they are taken. Held only in memory they are
+        # lost whenever a run has to be killed - and a run that had to be killed
+        # is exactly the one whose resource numbers you still want.
+        self._names = [n for n, _ in self.groups]
+        self._stream = None
+        if stream_path:
+            try:
+                self._stream = open(stream_path, "w", encoding="utf-8", buffering=1)
+                self._stream.write("rel_s,ncpu,busy_pct,idle_pct," +
+                                   ",".join(self._names) + "\n")
+            except OSError:
+                self._stream = None
+
+    def _emit(self, sample):
+        if self._stream is None:
+            return
+        try:
+            self._stream.write(
+                f"{sample['rel']},{self.ncpu},{sample['busy_pct']},{sample['idle_pct']},"
+                + ",".join(str(sample["groups"].get(n, 0)) for n in self._names) + "\n")
+        except (OSError, ValueError):
+            self._stream = None
+
+    def close_stream(self):
+        if self._stream is not None:
+            try:
+                self._stream.flush()
+                self._stream.close()
+            except (OSError, ValueError):
+                pass
+            self._stream = None
 
     def stop(self):
         self._stop.set()
@@ -117,13 +148,15 @@ class CpuSampler(threading.Thread):
                     counts[group] = counts.get(group, 0) + 1
 
                 busy = sum(by_group.values())
-                self.samples.append({
+                sample = {
                     "rel": round(time.time() - self.t0, 2),
                     "groups": {k: round(v, 1) for k, v in by_group.items()},
                     "counts": counts,
                     "busy_pct": round(busy, 1),
                     "idle_pct": round(max(0.0, 100.0 * self.ncpu - busy), 1),
-                })
+                }
+                self.samples.append(sample)
+                self._emit(sample)
                 prev_total, prev = total, cur
         except Exception as e:                      # noqa: BLE001
             self.error = f"{type(e).__name__}: {e}"
@@ -133,13 +166,29 @@ class ChannelSampler(threading.Thread):
     """Asterisk's own count of active channels - the independent check on how
     many calls were really up, rather than how many we asked for."""
 
-    def __init__(self, interval=2.0):
+    def __init__(self, interval=2.0, stream_path=None):
         super().__init__(daemon=True)
         self.interval = interval
         self.samples = []                 # [{rel, channels}]
         self._stop = threading.Event()
         self.t0 = time.time()
         self.available = True
+        self._stream = None
+        if stream_path:
+            try:
+                self._stream = open(stream_path, "w", encoding="utf-8", buffering=1)
+                self._stream.write("rel_s,channels\n")
+            except OSError:
+                self._stream = None
+
+    def close_stream(self):
+        if self._stream is not None:
+            try:
+                self._stream.flush()
+                self._stream.close()
+            except (OSError, ValueError):
+                pass
+            self._stream = None
 
     def stop(self):
         self._stop.set()
@@ -153,10 +202,16 @@ class ChannelSampler(threading.Thread):
                 ).stdout
                 m = re.search(r"(\d+)\s+active channel", out)
                 if m:
-                    self.samples.append({
+                    sample = {
                         "rel": round(time.time() - self.t0, 2),
                         "channels": int(m.group(1)),
-                    })
+                    }
+                    self.samples.append(sample)
+                    if self._stream is not None:
+                        try:
+                            self._stream.write(f"{sample['rel']},{sample['channels']}\n")
+                        except (OSError, ValueError):
+                            self._stream = None
             except (OSError, subprocess.SubprocessError):
                 self.available = False
                 return

@@ -421,8 +421,11 @@ def run_one(n, args, outdir):
     rec = _install(n, args.gap)
 
     from monitors import CpuSampler, ChannelSampler
-    cpu = CpuSampler(interval=args.cpu_interval)
-    chan = ChannelSampler(interval=args.channel_interval)
+    # Streamed alongside the event trace, so a killed run keeps its resource
+    # numbers too - which are the point of a concurrency test, not a footnote.
+    cpu = CpuSampler(interval=args.cpu_interval, stream_path=f"{stem}.cpu.csv")
+    chan = ChannelSampler(interval=args.channel_interval,
+                          stream_path=f"{stem}.channels.csv")
     cpu.start()
     chan.start()
 
@@ -462,6 +465,8 @@ def run_one(n, args, outdir):
         LIVE_CALLS.clear()
         cpu.stop()
         chan.stop()
+        cpu.close_stream()
+        chan.close_stream()
         time.sleep(args.cpu_interval * 2)
 
     if cpu.error:

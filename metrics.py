@@ -169,11 +169,15 @@ class RunMetrics:
         """How many calls were connected at each instant, measured rather than
         assumed. A call counts from media-ready (or connect) until it ends."""
         calls = self.calls()
+        # A killed run has no call_end for calls that were still going, so
+        # treat those as running until the last thing we saw. Requiring an end
+        # event reported a peak of 1 on a 40-call run.
+        last_seen = max((e["t"] for e in self.events), default=None)
         spans = []
         for c in calls:
             start = c["media_ready"] or c["connected"]
-            end = c["ended"]
-            if start and end:
+            end = c["ended"] or last_seen
+            if start and end and end >= start:
                 spans.append((start, end))
         if not spans:
             return []

@@ -5,11 +5,12 @@
 
 The trace is written as events happen, so it survives a kill. Everything
 derived from it - concurrency, per-turn response percentiles, call outcomes -
-can be recovered afterwards. CPU samples are only written at the end of a run,
-so those are gone; the timings, which are the expensive part, are not.
+can be recovered afterwards - including CPU and channel counts, which the
+samplers stream to CSV alongside it.
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -17,10 +18,61 @@ from metrics import RunMetrics
 import evaluate
 
 
-class _NoSamples:
-    samples = []
-    available = False
-    error = None
+class _Samples:
+    """Stands in for a live sampler, filled from the CSV it streamed."""
+
+    def __init__(self, samples=None, available=True):
+        self.samples = samples or []
+        self.available = available
+        self.error = None
+
+
+def load_cpu_csv(path):
+    """CPU samples the run streamed. Group columns are read from the header, so
+    this keeps working if the group list changes."""
+    if not path.exists():
+        return [], 0
+    rows, ncpu = [], 0
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if len(lines) < 2:
+        return [], 0
+    header = lines[0].split(",")
+    try:
+        gi = header.index("idle_pct") + 1
+    except ValueError:
+        return [], 0
+    names = header[gi:]
+    for line in lines[1:]:
+        parts = line.split(",")
+        if len(parts) != len(header):
+            continue                     # truncated final line from a kill
+        try:
+            ncpu = int(parts[1])
+            rows.append({
+                "rel": float(parts[0]),
+                "busy_pct": float(parts[2]),
+                "idle_pct": float(parts[3]),
+                "groups": {n: float(v) for n, v in zip(names, parts[gi:]) if float(v) > 0},
+                "counts": {},
+            })
+        except ValueError:
+            continue
+    return rows, ncpu
+
+
+def load_channels_csv(path):
+    if not path.exists():
+        return []
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines()[1:]:
+        parts = line.split(",")
+        if len(parts) != 2:
+            continue
+        try:
+            rows.append({"rel": float(parts[0]), "channels": int(parts[1])})
+        except ValueError:
+            continue
+    return rows
 
 
 def load(path):
@@ -59,8 +111,18 @@ def main():
     calls = rec.calls()
     requested = max((c["call_id"] for c in calls), default=0)
 
-    report = evaluate.build_report(label, requested, rec, _NoSamples(),
-                                   _NoSamples(), 0, wall)
+    # The samplers stream to CSV beside the trace, so a killed run keeps its
+    # resource numbers as well as its timings.
+    cpu_rows, ncpu = load_cpu_csv(path.parent / f"{label}.cpu.csv")
+    chan_rows = load_channels_csv(path.parent / f"{label}.channels.csv")
+    if not cpu_rows:
+        print("*** no cpu.csv beside the trace - CPU sections will be empty",
+              file=sys.stderr)
+
+    report = evaluate.build_report(label, requested, rec,
+                                   _Samples(cpu_rows),
+                                   _Samples(chan_rows, bool(chan_rows)),
+                                   ncpu or (os.cpu_count() or 1), wall)
 
     stem = path.with_suffix("").with_suffix("")      # strip .events.ndjson
     stem = stem.parent / f"{label}-rebuilt"
@@ -82,10 +144,10 @@ def main():
     with open(f"{stem}.txt", "w", encoding="utf-8") as f:
         f.write(text)
 
-    print(f"  rebuilt from {len(rec.events)} events")
-    print(f"  wrote {stem}.{{txt,json,turns.csv}}")
-    print("  (CPU data is not in the trace - it is only written when a run "
-          "finishes normally)\n")
+    print(f"  rebuilt from {len(rec.events)} events"
+          + (f", {len(cpu_rows)} cpu samples" if cpu_rows else "")
+          + (f", {len(chan_rows)} channel samples" if chan_rows else ""))
+    print(f"  wrote {stem}.{{txt,json,turns.csv}}\n")
 
 
 if __name__ == "__main__":
