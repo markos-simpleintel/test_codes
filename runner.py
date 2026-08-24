@@ -107,23 +107,40 @@ def main():
         print("*** account created without registration")
         print(f"*** starting {NUM_CALLS} direct INVITE call(s)")
 
+        failed_to_start = 0
         for call_id in range(1, NUM_CALLS + 1):
-            call = MyCall(
-                ep=ep,
-                acc=acc,
-                call_id=call_id,
-                dst_uri=DEST_URI,
-                actions=actions_for(call_id),
-                silence_wav=SILENCE_PAD_WAV,
-                ami_ready_events=ami_ready_events,
-            )
-            calls.append(call)
-            call.log(f"starting direct INVITE call to {DEST_URI} "
-                     f"[{describe_identity(call_id)}]")
-            call.start()
+            # Each call is started inside its own guard. Letting one failure
+            # escape to the outer handler sends control straight to `finally`,
+            # which hangs up every call that was working - so a single refused
+            # INVITE used to destroy the whole run rather than costing one call.
+            try:
+                call = MyCall(
+                    ep=ep,
+                    acc=acc,
+                    call_id=call_id,
+                    dst_uri=DEST_URI,
+                    actions=actions_for(call_id),
+                    silence_wav=SILENCE_PAD_WAV,
+                    ami_ready_events=ami_ready_events,
+                )
+                calls.append(call)
+                call.log(f"starting direct INVITE call to {DEST_URI} "
+                         f"[{describe_identity(call_id)}]")
+                call.start()
+            except pj.Error as e:
+                failed_to_start += 1
+                print(f"*** call {call_id} could not start: {e} "
+                      f"({failed_to_start} of {call_id} so far) - continuing")
+            except Exception as e:                          # noqa: BLE001
+                failed_to_start += 1
+                print(f"*** call {call_id} could not start: {e} - continuing")
 
             if call_id < NUM_CALLS and CALL_START_GAP_MS > 0:
                 time.sleep(CALL_START_GAP_MS / 1000.0)
+
+        if failed_to_start:
+            print(f"*** {failed_to_start} of {NUM_CALLS} calls failed to start; "
+                  f"continuing with {len(calls)}")
 
         started = time.time()
         while time.time() - started < MAX_CALL_SECONDS:
@@ -153,6 +170,17 @@ def main():
     finally:
         if ami_ready_events is not None:
             ami_ready_events.stop()
+
+        # Signal every call to stop before hanging up. A wait thread only exits
+        # when its call's _stop_evt is set, which normally happens on the
+        # DISCONNECTED callback - a call that never receives one leaves its
+        # thread looping, and the joins below then burn their full timeout each.
+        # Forty calls x two threads x two seconds was a three-minute teardown.
+        for call in calls:
+            try:
+                call._stop_evt.set()
+            except Exception:                               # noqa: BLE001
+                pass
 
         for call in calls:
             if not call.disconnected:

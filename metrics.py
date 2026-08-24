@@ -16,20 +16,45 @@ import time
 
 
 class RunMetrics:
-    def __init__(self):
+    def __init__(self, stream_path=None):
         self._lock = threading.Lock()
         self.events = []
         self.t0 = time.time()
+        # Events go to disk as they happen. Held only in memory, an ugly exit -
+        # a kill during a slow teardown, say - loses the whole run's timings,
+        # and the text log carries no timestamps to rebuild them from.
+        self._stream = None
+        if stream_path:
+            try:
+                self._stream = open(stream_path, "w", encoding="utf-8", buffering=1)
+            except OSError:
+                self._stream = None
 
     def record(self, kind, call_id=None, **fields):
+        event = {
+            "t": time.time(),
+            "rel": round(time.time() - self.t0, 3),
+            "kind": kind,
+            "call_id": call_id,
+            **fields,
+        }
         with self._lock:
-            self.events.append({
-                "t": time.time(),
-                "rel": round(time.time() - self.t0, 3),
-                "kind": kind,
-                "call_id": call_id,
-                **fields,
-            })
+            self.events.append(event)
+            if self._stream is not None:
+                try:
+                    self._stream.write(json.dumps(event) + "\n")
+                except (OSError, ValueError):
+                    self._stream = None
+
+    def close_stream(self):
+        with self._lock:
+            if self._stream is not None:
+                try:
+                    self._stream.flush()
+                    self._stream.close()
+                except (OSError, ValueError):
+                    pass
+                self._stream = None
 
     # ---- derived views -------------------------------------------------
 
@@ -164,6 +189,9 @@ class RunMetrics:
         return out
 
     def write_ndjson(self, path):
+        """Rewrite the trace in time order. The streamed copy is in arrival
+        order, which is close but not guaranteed across threads."""
+        self.close_stream()
         with self._lock:
             events = sorted(self.events, key=lambda e: e["t"])
         with open(path, "w", encoding="utf-8") as f:

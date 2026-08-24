@@ -14,6 +14,7 @@ so this cannot change how the test itself behaves.
 """
 
 import argparse
+import _thread
 import json
 import os
 import statistics
@@ -62,6 +63,7 @@ def _install(num_calls, gap_ms):
                             turn=turn, source=source, label=label)
 
         def start(self):
+            LIVE_CALLS.append(self)
             RECORDER.record("call_start", call_id=self.call_id)
             return super().start()
 
@@ -144,7 +146,7 @@ def summarize(values):
     }
 
 
-def project_ceiling(cpu_samples, calls_achieved, ncpu):
+def project_ceiling(cpu_samples, calls_achieved, ncpu, conc=None):
     """Which group runs out of room first, and roughly when.
 
     A multi-threaded process can use every core, so its limit is the box. A
@@ -161,6 +163,36 @@ def project_ceiling(cpu_samples, calls_achieved, ncpu):
             if v > peak.get(g, 0):
                 peak[g] = v
 
+    # A group whose CPU barely rises between the idle baseline and peak load is
+    # not paying a per-call cost - it is constant background work. Dividing its
+    # peak by the call count would invent a per-call figure and project a
+    # nonsense ceiling from it.
+    #
+    # The comparison is against genuinely idle samples (the second of sampling
+    # before any call is placed, plus the drain after they end) rather than a
+    # split of the loaded period - concurrency usually sits on a plateau, and a
+    # percentile split of a plateau finds no contrast at all.
+    flat = set()
+    if conc:
+        by_rel = {round(p["rel"], 1): p["calls"] for p in conc}
+        peak_calls = max(p["calls"] for p in conc)
+        idle, busy = {}, {}
+        for smp in cpu_samples:
+            n = by_rel.get(round(smp["rel"], 1), 0)
+            bucket = idle if n == 0 else (busy if n >= peak_calls * 0.8 else None)
+            if bucket is None:
+                continue
+            for g, v in smp["groups"].items():
+                bucket.setdefault(g, []).append(v)
+
+        for g in set(idle) & set(busy):
+            if len(idle[g]) < 2 or len(busy[g]) < 2:
+                continue
+            base = statistics.fmean(idle[g])
+            load = statistics.fmean(busy[g])
+            if load < max(base * 1.5, base + 5):
+                flat.add(g)
+
     single_threaded = {"pbx_receiver", "test_harness"}
     out = []
     for g, p in sorted(peak.items(), key=lambda kv: -kv[1]):
@@ -171,13 +203,17 @@ def project_ceiling(cpu_samples, calls_achieved, ncpu):
         out.append({
             "group": g,
             "peak_pct": round(p, 1),
-            "per_call_pct": round(per_call, 2),
+            "per_call_pct": None if g in flat else round(per_call, 2),
             "ceiling_pct": cap,
-            "projected_calls": int(cap / per_call),
+            "projected_calls": None if g in flat else int(cap / per_call),
             "headroom_pct": round(cap - p, 1),
             "scales_across_cores": g not in single_threaded,
+            "constant_load": g in flat,
         })
-    return sorted(out, key=lambda r: r["projected_calls"])
+    # Groups with no projection sort last; they impose a fixed tax rather than a
+    # limit that arrives at some call count.
+    return sorted(out, key=lambda r: (r["projected_calls"] is None,
+                                      r["projected_calls"] or 0))
 
 
 def build_report(label, requested, rec, cpu, chan, ncpu, wall_s):
@@ -232,7 +268,7 @@ def build_report(label, requested, rec, cpu, chan, ncpu, wall_s):
             "total_samples": len(cpu.samples),
             "box_capacity_pct": 100 * ncpu,
         },
-        "projection": project_ceiling(cpu.samples, peak_ours or len(connected), ncpu),
+        "projection": project_ceiling(cpu.samples, peak_ours or len(connected), ncpu, conc),
         "concurrency_timeline": conc,
         "channel_timeline": chan.samples,
         "cpu_timeline": cpu.samples,
@@ -284,22 +320,84 @@ def render(r):
         w("\nWHERE IT RUNS OUT")
         w(f"    {'group':<16}{'peak':<10}{'per call':<11}{'ceiling':<10}{'~calls':<9}scales?")
         for p in r["projection"]:
+            per_call = "constant" if p.get("constant_load") else str(p["per_call_pct"]) + "%"
+            calls = "-" if p["projected_calls"] is None else str(p["projected_calls"])
             w(f"    {p['group']:<16}{str(p['peak_pct'])+'%':<10}"
-              f"{str(p['per_call_pct'])+'%':<11}{str(p['ceiling_pct'])+'%':<10}"
-              f"{p['projected_calls']:<9}{'yes' if p['scales_across_cores'] else 'NO - single core'}")
-        first = r["projection"][0]
-        w(f"\n  First to run out: {first['group']} at roughly {first['projected_calls']} calls.")
-        if not first["scales_across_cores"]:
-            w("  It is single-threaded, so more cores will not move that number.")
+              f"{per_call:<11}{str(p['ceiling_pct'])+'%':<10}"
+              f"{calls:<9}{'yes' if p['scales_across_cores'] else 'NO - single core'}")
+
+        constant = [p for p in r["projection"] if p.get("constant_load")]
+        if constant:
+            w("\n  'constant' means CPU did not rise with call count - a fixed tax on"
+              " the box,")
+            w("  not a per-call cost, so no call-count ceiling can be projected from it:")
+            for p in constant:
+                w(f"    {p['group']}: ~{p['peak_pct']}% of a core regardless of load")
+
+        scaling = [p for p in r["projection"] if p["projected_calls"] is not None]
+        if scaling:
+            first = scaling[0]
+            w(f"\n  First to run out: {first['group']} at roughly {first['projected_calls']} calls.")
+            if not first["scales_across_cores"]:
+                w("  It is single-threaded, so more cores will not move that number.")
+            if r["calls"]["peak_concurrent_measured"] < 2:
+                w("  Projected from a single call, so treat it as a direction, not a number -"
+                  " re-run at higher concurrency to fit a real slope.")
     w("")
     return "\n".join(L)
+
+
+LIVE_CALLS = []
+
+
+def _release_calls():
+    """Tell every call to stop before teardown reaches its thread joins.
+
+    A wait thread exits only when its call's _stop_evt is set. Teardown joins
+    two threads per call with a 2s timeout each, so calls that never received a
+    DISCONNECTED callback used to cost two seconds apiece - minutes, at forty
+    calls.
+    """
+    for call in LIVE_CALLS:
+        try:
+            call._stop_evt.set()
+        except Exception:                                   # noqa: BLE001
+            pass
+
+
+def _stall_watchdog(rec, timeout, stop_evt):
+    """End a run that has quietly died.
+
+    runner.main() waits until every call reports disconnected, or
+    MAX_CALL_SECONDS (30 minutes) elapses. A call whose DISCONNECTED callback
+    never fires holds the whole run open with nothing happening - Asterisk shows
+    zero channels while the harness sits there. Interrupting the main thread
+    trips runner's own KeyboardInterrupt handler, so teardown and the report
+    still happen normally.
+    """
+    while not stop_evt.wait(2.0):
+        events = rec.events
+        last = events[-1]["t"] if events else None
+        if last is None:
+            continue
+        idle = time.time() - last
+        if idle > timeout:
+            _release_calls()
+            print(f"\n*** no call activity for {int(idle)}s - ending the run "
+                  f"(raise --stall-timeout if calls are legitimately this quiet)",
+                  file=sys.stderr)
+            _thread.interrupt_main()
+            return
 
 
 def run_one(n, args, outdir):
     from metrics import RunMetrics
     import metrics as metrics_mod
 
-    metrics_mod.RECORDER = RunMetrics()
+    stem = outdir / f"{args.label}-{n}calls"
+    # Stream to disk from the first event so an ugly exit costs at most the
+    # last event rather than the entire run's timings.
+    metrics_mod.RECORDER = RunMetrics(stream_path=f"{stem}.events.ndjson")
     rec = _install(n, args.gap)
 
     from monitors import CpuSampler, ChannelSampler
@@ -307,6 +405,25 @@ def run_one(n, args, outdir):
     chan = ChannelSampler(interval=args.channel_interval)
     cpu.start()
     chan.start()
+
+    import signal
+    import threading
+
+    def _on_sigint(_sig, _frm):
+        # runner.main() catches KeyboardInterrupt and tears down cleanly; this
+        # just makes sure its thread joins do not have to wait anyone out.
+        _release_calls()
+        raise KeyboardInterrupt
+    try:
+        signal.signal(signal.SIGINT, _on_sigint)
+    except (ValueError, OSError):
+        pass
+
+    stall_stop = threading.Event()
+    threading.Thread(target=_stall_watchdog,
+                     args=(rec, args.stall_timeout, stall_stop),
+                     daemon=True).start()
+
     time.sleep(1.0)
 
     # runner.py's own entry point wraps main() in the file logger; calling
@@ -321,6 +438,8 @@ def run_one(n, args, outdir):
             runner.main()
     finally:
         wall = time.time() - t0
+        stall_stop.set()
+        LIVE_CALLS.clear()
         cpu.stop()
         chan.stop()
         time.sleep(args.cpu_interval * 2)
@@ -333,7 +452,6 @@ def run_one(n, args, outdir):
     report = build_report(f"{args.label}-{n}", n, rec, cpu, chan,
                           os.cpu_count() or 1, wall)
 
-    stem = outdir / f"{args.label}-{n}calls"
     with open(f"{stem}.json", "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
     rec.write_ndjson(f"{stem}.events.ndjson")
@@ -370,6 +488,9 @@ def main():
                     help="ms between call starts (default: leave config alone)")
     ap.add_argument("--cpu-interval", type=float, default=0.5)
     ap.add_argument("--channel-interval", type=float, default=2.0)
+    ap.add_argument("--stall-timeout", type=int, default=120,
+                    help="end the run after this many seconds with no call activity "
+                         "(default 120; the per-turn wait can legitimately reach 60)")
     ap.add_argument("--settle", type=int, default=30,
                     help="seconds between levels in a ladder")
     ap.add_argument("--out", default="results")

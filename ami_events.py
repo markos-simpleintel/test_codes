@@ -92,6 +92,10 @@ class AmiReadyEvents:
         with self._cond:
             return self._running
 
+    def multiple_channels_seen(self):
+        with self._cond:
+            return len(self._claimed_channel_keys) > 1
+
     def current_sequence(self):
         with self._cond:
             return self._sequence
@@ -105,6 +109,15 @@ class AmiReadyEvents:
             return self._channel_sequence
 
     def wait_for_event_after(self, sequence, timeout_secs, stop_evt, linkedid=""):
+        # Without a linkedid there is no way to tell whose event this is. With
+        # one call that is harmless; with several it means a call can advance
+        # its script on a different call's cue, corrupting both the conversation
+        # and its timings. Channel binding times out under load, which is
+        # exactly when it matters, so refuse and let the caller fall back to
+        # RTP silence detection.
+        if not linkedid and self.multiple_channels_seen():
+            return False
+
         deadline = time.time() + timeout_secs if timeout_secs else None
         with self._cond:
             while not stop_evt.is_set():
@@ -287,12 +300,27 @@ class AmiReadyEvents:
                 self._transfer_sequence += 1
                 self._last_transfer_event = dict(msg)
                 self._transfer_events.append((self._transfer_sequence, dict(msg)))
+            self._prune_locked()
             self._cond.notify_all()
 
         if ready_matched:
             print(f"*** AMI ready event matched: {summary}")
         if transfer_matched:
             print(f"*** AMI transfer event matched: {summary}")
+
+    # Waiters only ever look for events newer than a sequence they already hold,
+    # so anything far enough behind can never be matched again. Without this the
+    # lists grow all run and every waiting call rescans all of them every 250ms
+    # while holding the lock - so a long run slows down as it goes.
+    MAX_RETAINED_EVENTS = 4000
+
+    def _prune_locked(self):
+        for name in ("_ready_events", "_transfer_events", "_channel_events"):
+            events = getattr(self, name)
+            if len(events) > self.MAX_RETAINED_EVENTS:
+                del events[:len(events) - self.MAX_RETAINED_EVENTS]
+        if len(self._claimed_channel_keys) > self.MAX_RETAINED_EVENTS * 2:
+            self._claimed_channel_keys.clear()
 
     def _matches_channel_event(self, msg):
         event_name = msg.get("Event", "")
