@@ -53,35 +53,51 @@ class CpuSampler(threading.Thread):
     """Samples per-process CPU into groups. Percentages are per-core, matching
     top: 100 means one core fully used."""
 
-    def __init__(self, interval=0.5, groups=None, stream_path=None):
+    def __init__(self, interval=0.5, groups=None, stream_path=None, t0=None):
         super().__init__(daemon=True)
         self.interval = interval
         self.groups = groups or DEFAULT_GROUPS
         self.samples = []                 # [{rel, idle_pct, groups:{name: pct}, procs: n}]
         self.ncpu = os.cpu_count() or 1
         self._stop = threading.Event()
-        self.t0 = time.time()
+        self.t0 = t0 or time.time()
         self.error = None
         # Samples go to disk as they are taken. Held only in memory they are
         # lost whenever a run has to be killed - and a run that had to be killed
         # is exactly the one whose resource numbers you still want.
         self._names = [n for n, _ in self.groups]
+        # Every distinct pid ever seen in a group. EAGI starts a fresh Python
+        # process per turn, so a group's cost can be process churn rather than
+        # work the processes do - a distinction the percentages hide, and the
+        # one that decides whether tuning the code or reusing the process is
+        # what would help.
+        self.pids_seen = {n: set() for n in self._names}
         self._stream = None
         if stream_path:
             try:
                 self._stream = open(stream_path, "w", encoding="utf-8", buffering=1)
-                self._stream.write("rel_s,ncpu,busy_pct,idle_pct," +
-                                   ",".join(self._names) + "\n")
+                cols = (["rel_s", "ncpu", "busy_pct", "idle_pct"]
+                        + self._names
+                        + ["n_" + n for n in self._names]
+                        + ["spawned_" + n for n in self._names])
+                self._stream.write(",".join(cols) + "\n")
             except OSError:
                 self._stream = None
+
+    @property
+    def spawn_counts(self):
+        """How many processes each group started over the whole run."""
+        return {n: len(v) for n, v in self.pids_seen.items() if v}
 
     def _emit(self, sample):
         if self._stream is None:
             return
         try:
-            self._stream.write(
-                f"{sample['rel']},{self.ncpu},{sample['busy_pct']},{sample['idle_pct']},"
-                + ",".join(str(sample["groups"].get(n, 0)) for n in self._names) + "\n")
+            row = ([sample["rel"], self.ncpu, sample["busy_pct"], sample["idle_pct"]]
+                   + [sample["groups"].get(n, 0) for n in self._names]
+                   + [sample["counts"].get(n, 0) for n in self._names]
+                   + [sample["spawned"].get(n, 0) for n in self._names])
+            self._stream.write(",".join(str(x) for x in row) + "\n")
         except (OSError, ValueError):
             self._stream = None
 
@@ -135,6 +151,8 @@ class CpuSampler(threading.Thread):
 
                 by_group = {}
                 counts = {}
+                for pid, (group, _jiff) in cur.items():
+                    self.pids_seen.setdefault(group, set()).add(pid)
                 for pid, (group, jiff) in cur.items():
                     if pid not in prev:
                         continue          # first sighting; no delta yet
@@ -154,6 +172,7 @@ class CpuSampler(threading.Thread):
                     "counts": counts,
                     "busy_pct": round(busy, 1),
                     "idle_pct": round(max(0.0, 100.0 * self.ncpu - busy), 1),
+                    "spawned": {g: len(v) for g, v in self.pids_seen.items()},
                 }
                 self.samples.append(sample)
                 self._emit(sample)
@@ -166,12 +185,12 @@ class ChannelSampler(threading.Thread):
     """Asterisk's own count of active channels - the independent check on how
     many calls were really up, rather than how many we asked for."""
 
-    def __init__(self, interval=2.0, stream_path=None):
+    def __init__(self, interval=2.0, stream_path=None, t0=None):
         super().__init__(daemon=True)
         self.interval = interval
         self.samples = []                 # [{rel, channels}]
         self._stop = threading.Event()
-        self.t0 = time.time()
+        self.t0 = t0 or time.time()
         self.available = True
         self._stream = None
         if stream_path:

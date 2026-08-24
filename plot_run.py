@@ -191,7 +191,14 @@ def plot_ladder(runs, out):
             marker="o", ms=5, label="95th percentile")
     ax.plot(x, [p[1] for p in pts], color=COLORS["asterisk"], lw=2,
             marker="o", ms=5, label="median")
-    ax.axhline(5000, color=INK_3, lw=1, ls=(0, (5, 4)))
+    slo = next((r.get("slo_ms") for r in runs if r.get("slo_ms")), None)
+    if slo:
+        ax.axhline(slo, color=INK_3, lw=1, ls=(0, (5, 4)))
+        # Right-aligned: the legend sits top-left, and the two collide there.
+        ax.annotate(f"too slow above {slo / 1000:g}s", xy=(1, slo),
+                    xycoords=("axes fraction", "data"), xytext=(-4, 5),
+                    textcoords="offset points", color=INK_3, fontsize=9,
+                    ha="right", va="bottom")
     ax.set_ylabel("response time", color=INK_2, fontsize=9.5)
     ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _p: f"{v/1000:g}s"))
     ax.set_title("Response time and CPU vs concurrent calls", color=INK,
@@ -211,6 +218,60 @@ def plot_ladder(runs, out):
     style(ax2)
     ax2.legend(frameon=False, loc="upper left", fontsize=9.5, labelcolor=INK_2)
 
+    fig.tight_layout()
+    fig.savefig(out, dpi=200, facecolor=SURFACE)
+    plt.close(fig)
+    return out
+
+
+def plot_degradation(runs, out):
+    """Every answered turn as one point: what it waited, against the load that
+    applied to it.
+
+    A rung of a ladder is one average at one call count. This is every
+    observation at every load the run passed through, which is where the shape
+    of the degradation actually shows - whether it is a straight line, a knee,
+    or a cliff.
+    """
+    pts = []
+    for r in runs:
+        for t in r.get("turns") or []:
+            if t.get("response_ms") is not None and t.get("inflight") is not None:
+                pts.append((t["inflight"], t["response_ms"]))
+    if len(pts) < 10:
+        return None
+
+    fig, ax = plt.subplots(figsize=(9, 5.2))
+    fig.patch.set_facecolor(SURFACE)
+    ax.scatter([p[0] for p in pts], [p[1] for p in pts], s=14, alpha=0.35,
+               color=COLORS["asterisk"], edgecolors="none", label="one answered turn")
+
+    # Median wait in each load bucket - the trend, without the scatter's noise.
+    buckets = {}
+    for x, y in pts:
+        buckets.setdefault(x, []).append(y)
+    xs = sorted(b for b, v in buckets.items() if len(v) >= 3)
+    if xs:
+        meds = [sorted(buckets[b])[len(buckets[b]) // 2] for b in xs]
+        ax.plot(xs, meds, color=COLORS["vad_bargein"], lw=2.2, marker="o", ms=4,
+                label="median at that load")
+
+    slo = next((r.get("slo_ms") for r in runs if r.get("slo_ms")), None)
+    if slo:
+        ax.axhline(slo, color=INK_3, lw=1.2, ls=(0, (5, 4)))
+        # Right-aligned: the legend sits top-left, and the two collide there.
+        ax.annotate(f"too slow above {slo / 1000:g}s", xy=(1, slo),
+                    xycoords=("axes fraction", "data"), xytext=(-4, 5),
+                    textcoords="offset points", color=INK_3, fontsize=9,
+                    ha="right", va="bottom")
+
+    ax.set_xlabel("requests in flight at that moment", color=INK_2, fontsize=9.5)
+    ax.set_ylabel("caller wait", color=INK_2, fontsize=9.5)
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _p: f"{v/1000:g}s"))
+    ax.set_title("What each caller waited, against the load at that moment",
+                 color=INK, fontsize=13, loc="left", pad=14)
+    style(ax)
+    ax.legend(frameon=False, loc="upper left", fontsize=9.5, labelcolor=INK_2)
     fig.tight_layout()
     fig.savefig(out, dpi=200, facecolor=SURFACE)
     plt.close(fig)
@@ -251,6 +312,11 @@ def main():
             else:
                 print(f"  (no {suffix} data in {Path(p).name})", file=sys.stderr)
 
+    if runs:
+        outdir = Path(args.out) if args.out else Path(paths[0]).parent
+        got = plot_degradation(runs, outdir / "degradation.png")
+        if got:
+            written.append(got)
     if len(runs) > 1:
         outdir = Path(args.out) if args.out else Path(paths[0]).parent
         got = plot_ladder(runs, outdir / "ladder.png")

@@ -5,10 +5,15 @@
 
 The trace is written as events happen, so it survives a kill. Everything
 derived from it - concurrency, per-turn response percentiles, call outcomes -
-can be recovered afterwards - including CPU and channel counts, which the
+can be recovered afterwards, including CPU and channel counts, which the
 samplers stream to CSV alongside it.
+
+Rebuilt rungs fold back into a ladder summary with:
+
+    python evaluate.py --label ladder --summarize results/ladder-*calls.json
 """
 
+import argparse
 import json
 import os
 import sys
@@ -21,43 +26,63 @@ import evaluate
 class _Samples:
     """Stands in for a live sampler, filled from the CSV it streamed."""
 
-    def __init__(self, samples=None, available=True):
+    def __init__(self, samples=None, available=True, spawn_counts=None):
         self.samples = samples or []
         self.available = available
+        self.spawn_counts = spawn_counts or {}
         self.error = None
 
 
 def load_cpu_csv(path):
-    """CPU samples the run streamed. Group columns are read from the header, so
-    this keeps working if the group list changes."""
+    """CPU samples the run streamed.
+
+    Column names come from the header rather than from a fixed layout, so this
+    keeps working when the group list changes, and tolerates traces written
+    before the per-group process counts existed.
+    """
     if not path.exists():
-        return [], 0
-    rows, ncpu = [], 0
+        return [], 0, {}
     lines = path.read_text(encoding="utf-8").splitlines()
     if len(lines) < 2:
-        return [], 0
+        return [], 0, {}
+
     header = lines[0].split(",")
     try:
         gi = header.index("idle_pct") + 1
     except ValueError:
-        return [], 0
-    names = header[gi:]
+        return [], 0, {}
+    tail = header[gi:]
+    idx = {name: gi + i for i, name in enumerate(tail)}
+    pct_names = [n for n in tail if not n.startswith(("n_", "spawned_"))]
+
+    rows, ncpu, spawned = [], 0, {}
     for line in lines[1:]:
         parts = line.split(",")
         if len(parts) != len(header):
             continue                     # truncated final line from a kill
         try:
             ncpu = int(parts[1])
+            groups, counts = {}, {}
+            for n in pct_names:
+                v = float(parts[idx[n]])
+                if v > 0:
+                    groups[n] = v
+                if "n_" + n in idx:
+                    counts[n] = int(float(parts[idx["n_" + n]]))
+                if "spawned_" + n in idx:
+                    # Monotonic, so the largest value seen is the run total.
+                    spawned[n] = max(spawned.get(n, 0),
+                                     int(float(parts[idx["spawned_" + n]])))
             rows.append({
                 "rel": float(parts[0]),
                 "busy_pct": float(parts[2]),
                 "idle_pct": float(parts[3]),
-                "groups": {n: float(v) for n, v in zip(names, parts[gi:]) if float(v) > 0},
-                "counts": {},
+                "groups": groups,
+                "counts": counts,
             })
-        except ValueError:
+        except (ValueError, IndexError):
             continue
-    return rows, ncpu
+    return rows, ncpu, {k: v for k, v in spawned.items() if v}
 
 
 def load_channels_csv(path):
@@ -92,10 +117,15 @@ def load(path):
 
 
 def main():
-    if len(sys.argv) < 2:
-        sys.exit("usage: python rebuild.py <run>.events.ndjson")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("trace", help="<run>.events.ndjson")
+    ap.add_argument("--slo", type=float, default=10000,
+                    help="wait in ms above which a turn counts as too slow")
+    ap.add_argument("--silence-timer", type=float, default=2.0,
+                    help="seconds of configured PBX silence timer to report separately")
+    args = ap.parse_args()
 
-    path = Path(sys.argv[1])
+    path = Path(args.trace)
     if not path.exists():
         sys.exit(f"not found: {path}")
 
@@ -113,33 +143,47 @@ def main():
 
     # The samplers stream to CSV beside the trace, so a killed run keeps its
     # resource numbers as well as its timings.
-    cpu_rows, ncpu = load_cpu_csv(path.parent / f"{label}.cpu.csv")
+    cpu_rows, ncpu, spawned = load_cpu_csv(path.parent / f"{label}.cpu.csv")
     chan_rows = load_channels_csv(path.parent / f"{label}.channels.csv")
     if not cpu_rows:
         print("*** no cpu.csv beside the trace - CPU sections will be empty",
               file=sys.stderr)
 
-    report = evaluate.build_report(label, requested, rec,
-                                   _Samples(cpu_rows),
-                                   _Samples(chan_rows, bool(chan_rows)),
-                                   ncpu or (os.cpu_count() or 1), wall)
+    report = evaluate.build_report(
+        label, requested, rec,
+        _Samples(cpu_rows, spawn_counts=spawned),
+        _Samples(chan_rows, bool(chan_rows)),
+        ncpu or (os.cpu_count() or 1), wall,
+        silence_timer_ms=args.silence_timer * 1000.0,
+        slo_ms=args.slo,
+    )
 
-    stem = path.with_suffix("").with_suffix("")      # strip .events.ndjson
-    stem = stem.parent / f"{label}-rebuilt"
+    stem = path.parent / f"{label}-rebuilt"
 
     with open(f"{stem}.json", "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
 
     with open(f"{stem}.turns.csv", "w", encoding="utf-8") as f:
         f.write("call_id,turn,action_type,action,response_ms,remote_speech_ms,"
-                "turn_total_ms,detected_by\n")
+                "turn_total_ms,detected_by,calls_up,inflight\n")
         for t in report["turns"]:
             f.write(f"{t['call_id']},{t.get('turn','')},{t.get('action_type','')},"
                     f"\"{t.get('action','')}\",{t.get('response_ms','')},"
                     f"{t.get('remote_speech_ms','')},{t.get('turn_total_ms','')},"
-                    f"{t.get('detected_by','')}\n")
+                    f"{t.get('detected_by','')},{t.get('calls_up','')},"
+                    f"{t.get('inflight','')}\n")
 
     text = evaluate.render(report)
+    # A trace that stops early cannot distinguish a call the system abandoned
+    # from one that was still going when the recording stopped. Both look
+    # identical here, so the verdict is stated for what it is.
+    unfinished = sum(1 for c in calls if c["connected"] and not c["ended"])
+    if unfinished:
+        text += (f"\n  NOTE: {unfinished} call(s) have no end event - the trace stops "
+                 f"while they were still\n  running. They are counted as failures above, "
+                 f"but a trace that was cut short looks\n  exactly the same as a call the "
+                 f"system stopped answering. Treat those verdicts as\n  'unknown', and "
+                 f"read the timings, concurrency and CPU, which are unaffected.\n")
     print(text)
     with open(f"{stem}.txt", "w", encoding="utf-8") as f:
         f.write(text)
@@ -148,6 +192,8 @@ def main():
           + (f", {len(cpu_rows)} cpu samples" if cpu_rows else "")
           + (f", {len(chan_rows)} channel samples" if chan_rows else ""))
     print(f"  wrote {stem}.{{txt,json,turns.csv}}\n")
+    print(f"  to fold this rung into a ladder summary, copy it over the original:")
+    print(f"    cp {stem}.json {path.parent / (label + '.json')}\n")
 
 
 if __name__ == "__main__":

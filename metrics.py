@@ -192,6 +192,125 @@ class RunMetrics:
             t += step
         return out
 
+    # ---- load, as opposed to call count ---------------------------------
+    #
+    # "40 concurrent calls" is not 40 units of work. A call sitting in silence
+    # while the caller thinks costs a channel and a VAD process; a call that has
+    # just stopped speaking costs ASR, an LLM turn and TTS. Only the second kind
+    # loads the pipeline, and it is the one that decides where the system tops
+    # out - so it is measured separately rather than inferred from call count.
+
+    def _call_spans(self):
+        """(start, end) for every call that got as far as media."""
+        last_seen = max((e["t"] for e in self.events), default=None)
+        spans = []
+        for c in self.calls():
+            start = c["media_ready"] or c["connected"]
+            end = c["ended"] or last_seen
+            if start and end and end >= start:
+                spans.append((start, end))
+        return spans
+
+    def inflight_spans(self, turns=None):
+        """(start, end) for every window where a call was waiting on the system.
+
+        Opens when our audio stops and closes when the far end starts speaking:
+        exactly the interval during which the request is somewhere in the
+        pipeline, and exactly what a caller experiences as silence.
+        """
+        last_seen = max((e["t"] for e in self.events), default=None)
+        spans = []
+        for t in (self.turns() if turns is None else turns):
+            start = t.get("action_end")
+            if start is None:
+                continue
+            end = t.get("first_voice") or t.get("turn_end") or last_seen
+            if end and end >= start:
+                spans.append((start, end))
+        return spans
+
+    @staticmethod
+    def _count_at(spans, instant):
+        return sum(1 for s, e in spans if s <= instant <= e)
+
+    def inflight_timeline(self, step=0.5, turns=None):
+        spans = self.inflight_spans(turns)
+        if not spans:
+            return []
+        lo = min(s for s, _ in spans)
+        hi = max(e for _, e in spans)
+        out, t = [], lo
+        while t <= hi:
+            out.append({"rel": round(t - self.t0, 2),
+                        "inflight": self._count_at(spans, t)})
+            t += step
+        return out
+
+    def annotate(self, turns=None):
+        """Tag each turn with the load in effect when it started waiting.
+
+        This is what turns a run into a curve. Every turn becomes one
+        (load, latency) observation, so response time can be plotted against
+        the concurrency that actually applied to it rather than against the
+        call count the run was launched with - which is only true for an
+        instant at the very start.
+        """
+        turns = self.turns() if turns is None else turns
+        call_spans = self._call_spans()
+        flight_spans = self.inflight_spans(turns)
+        for t in turns:
+            at = t.get("action_end")
+            if at is None:
+                t["calls_up"] = None
+                t["inflight"] = None
+                continue
+            t["calls_up"] = self._count_at(call_spans, at)
+            # Counting the instant our audio stops would include this turn's own
+            # request, which has not been submitted yet; a hair earlier does not.
+            t["inflight"] = self._count_at(flight_spans, at - 0.001)
+        return turns
+
+    # ---- did it work -----------------------------------------------------
+
+    def outcomes(self, turns=None):
+        """One verdict per call, in categories that say what actually failed.
+
+        A capacity test needs a definition of failure that is not "the number
+        looked high". These are structural: either the call connected or it did
+        not, either the far end answered a turn or it did not.
+        """
+        turns = self.annotate() if turns is None else turns
+        by_call = {}
+        for t in turns:
+            by_call.setdefault(t["call_id"], []).append(t)
+
+        out = []
+        for c in self.calls():
+            ts = by_call.get(c["call_id"], [])
+            answered = [t for t in ts if t.get("response_ms") is not None]
+            # A turn where our audio finished and nothing ever came back.
+            unanswered = [t for t in ts
+                          if t.get("action_end") is not None
+                          and t.get("first_voice") is None]
+            if not c["connected"]:
+                verdict = "never_connected"
+            elif not (c["media_ready"] or answered):
+                verdict = "no_media"
+            elif not answered:
+                verdict = "no_response_at_all"
+            elif unanswered:
+                verdict = "abandoned_mid_call"
+            else:
+                verdict = "completed"
+            out.append({
+                "call_id": c["call_id"],
+                "verdict": verdict,
+                "turns_answered": len(answered),
+                "turns_unanswered": len(unanswered),
+                "duration_s": c["duration_s"],
+            })
+        return out
+
     def write_ndjson(self, path):
         """Rewrite the trace in time order. The streamed copy is in arrival
         order, which is close but not guaranteed across threads."""
