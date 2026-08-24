@@ -337,6 +337,12 @@ def build_report(label, requested, rec, cpu, chan, ncpu, wall_s,
             "mean_inflight": mean_flight,
             "completed_turns": len(turns),
             "answered_turns": len(answered),
+            # How far into the script each call actually got. A call that ends
+            # after five turns of a fifteen-turn conversation is a failure the
+            # per-call verdict cannot see: every turn it did get was answered,
+            # so it looks completed. This is the number that shows it.
+            "turns_per_call": summarize([o["turns_answered"] for o in outcomes
+                                         if o["turns_answered"]]),
         },
         "outcomes": {
             "by_verdict": verdicts,
@@ -400,6 +406,13 @@ def render(r):
         if v != "completed":
             w(f"  {v:<24} {n:<5} {VERDICT_TEXT.get(v, '')}")
     w(f"  turns answered           {c['answered_turns']} of {c['completed_turns']} asked")
+    tpc = c.get("turns_per_call") or {}
+    if tpc.get("count"):
+        w(f"  turns per call           median {tpc['p50']:.0f}   "
+          f"best {tpc['max']:.0f}   ({tpc['count']} calls)")
+        w("     How far into the script each call got before it ended. Calls that")
+        w("     end early still show every turn answered, so this is where a")
+        w("     conversation breaking down shows up and the verdict above does not.")
     if r.get("slo_ms"):
         w(f"  waits over {r['slo_ms'] / 1000:.1f}s          "
           f"{lat['slo_breaches']} of {c['answered_turns']}")
@@ -487,6 +500,13 @@ def render(r):
               f"{first['projected_calls']} concurrent calls.")
             if not first["scales_across_cores"]:
                 w("  It is single-threaded, so adding cores will not move that number.")
+            if first["group"] == "test_harness":
+                w("  That is this test rig, not the system under test. It says the")
+                w("  measurement stops being trustworthy near that call count - run")
+                w("  the harness from another box before reading anything above it.")
+            if first["fit_r2"] is not None and first["fit_r2"] < 0.5:
+                w(f"  The fit behind that number is weak (R2 {first['fit_r2']}), so treat")
+                w("  it as a direction rather than a figure.")
     w("")
     return "\n".join(L)
 
@@ -508,8 +528,10 @@ def build_ladder(reports, slo_ms=None):
             "p95": lat["response"].get("p95"),
             "pipeline_p50": lat["pipeline"].get("p50"),
             "slo_breaches": lat["slo_breaches"],
+            "turns_per_call": (c.get("turns_per_call") or {}).get("p50"),
             "min_idle": r["cpu"].get("min_idle_of_box_pct", r["cpu"]["min_idle_pct"]),
             "saturated": r["cpu"]["saturated_samples"],
+            "cpu_samples": r["cpu"]["total_samples"],
             "top_group": next(iter(r["cpu"]["peak_by_group"]), None),
             "top_pct": next(iter(r["cpu"]["peak_by_group"].values()), None),
         })
@@ -522,7 +544,19 @@ def build_ladder(reports, slo_ms=None):
     first_failure = next((x["requested"] for x in rungs if x["failed"]), None)
     first_slo = next((x["requested"] for x in rungs
                       if slo_ms and x["p95"] and x["p95"] > slo_ms), None)
-    first_sat = next((x["requested"] for x in rungs if x["saturated"]), None)
+    # One sample touching zero is a spike, not a saturated box. Sustained means
+    # at least three samples and one percent of the run.
+    first_sat = next((x["requested"] for x in rungs
+                      if x["saturated"] >= 3
+                      and x["saturated"] >= 0.01 * (x["cpu_samples"] or 1)), None)
+
+    # Conversations getting shorter is a failure the per-call verdict cannot
+    # see - every turn a truncated call did get was answered. Measured against
+    # the smallest rung, so no absolute idea of "a full conversation" is needed.
+    base_tpc = next((x["turns_per_call"] for x in rungs if x["turns_per_call"]), None)
+    first_collapse = next((x["requested"] for x in rungs
+                           if base_tpc and x["turns_per_call"]
+                           and x["turns_per_call"] < 0.6 * base_tpc), None)
 
     # Pooled across every rung: the densest available view of wait against load.
     xs, ys = [], []
@@ -544,6 +578,26 @@ def build_ladder(reports, slo_ms=None):
             t0_ys.append(s["p50"])
     turn0 = fit_line(t0_xs, t0_ys)
 
+    # Each turn asks the backend for something different - a name lookup is not
+    # a yes/no - so pooling every turn together buries the load signal under the
+    # difference between turns. Fitting one turn index at a time across the
+    # rungs holds the work constant and lets concurrency show.
+    per_turn = {}
+    for r in reports:
+        for k, s in r["latency_ms"]["by_turn"].items():
+            if s.get("p50"):
+                per_turn.setdefault(k, ([], []))
+                per_turn[k][0].append(r["requested_calls"])
+                per_turn[k][1].append(s["p50"])
+    turn_fits = {}
+    for k, (xs, ys) in per_turn.items():
+        f = fit_line(xs, ys)
+        if f:
+            base = min(zip(xs, ys))[1]
+            top = max(zip(xs, ys))[1]
+            turn_fits[k] = {**f, "base_p50": base, "top_p50": top,
+                            "growth": round(top / base, 2) if base else None}
+
     ceilings = {}
     for r in reports:
         for p in r["projection"]:
@@ -556,8 +610,11 @@ def build_ladder(reports, slo_ms=None):
         "first_failure_at": first_failure,
         "first_slo_breach_at": first_slo,
         "first_saturation_at": first_sat,
+        "first_collapse_at": first_collapse,
+        "base_turns_per_call": base_tpc,
         "pooled_fit": pooled,
         "turn0_fit": turn0,
+        "turn_fits": turn_fits,
         "turn0_points": list(zip(t0_xs, t0_ys)),
         "ceiling_by_group": {g: int(statistics.fmean(v)) for g, v in ceilings.items()},
         "cores": reports[0]["cores"] if reports else None,
@@ -577,16 +634,21 @@ def render_ladder(d):
     w(f"  CAPACITY LADDER   {rungs[0]['requested']} -> {top} calls   {d['cores']} cores")
     w("=" * 88)
 
-    w(f"\n  {'calls':<7}{'up':<6}{'inflt':<7}{'answrd':<8}{'failed':<8}"
+    w(f"\n  {'calls':<7}{'up':<6}{'inflt':<7}{'turns':<8}{'/call':<8}{'failed':<8}"
       f"{'p50':<10}{'p95':<10}{'vs base':<9}{'idle':<8}{'busiest':<20}")
     for x in rungs:
         busiest = (f"{x['top_group']} {x['top_pct']}%" if x["top_group"] else "-")
+        tpc = f"{x['turns_per_call']:.0f}" if x["turns_per_call"] else "-"
         w(f"  {x['requested']:<7}{x['peak_calls']:<6}{x['peak_inflight']:<7}"
-          f"{x['answered']:<8}{x['failed']:<8}{ms(x['p50'], 10)}{ms(x['p95'], 10)}"
+          f"{x['answered']:<8}{tpc:<8}{x['failed']:<8}{ms(x['p50'], 10)}{ms(x['p95'], 10)}"
           f"{(str(x['vs_base']) + 'x' if x['vs_base'] else '-'):<9}"
           f"{(str(x['min_idle']) + '%' if x['min_idle'] is not None else '-'):<8}{busiest:<20}")
     w("\n     up      = calls actually connected at the same time")
     w("     inflt   = requests in flight at once - the real load on the pipeline")
+    w("     turns   = turns answered across the whole rung")
+    w("     /call   = median turns each call got through before it ended. This")
+    w("               falling is a conversation breaking down, and it will not")
+    w("               show up as a failed call - every turn it got was answered.")
     w("     vs base = median wait as a multiple of the smallest rung")
 
     w("\nWHERE IT BREAKS")
@@ -598,12 +660,16 @@ def render_ladder(d):
             w(f"  {label:<28} not reached by {top} calls   {detail}")
 
     line("first failed call", d["first_failure_at"])
+    if d.get("base_turns_per_call"):
+        line("conversations cut short", d["first_collapse_at"],
+             f"(under 60% of the {d['base_turns_per_call']:.0f} turns/call "
+             f"the smallest rung managed)")
     if d["slo_ms"]:
         line(f"p95 wait over {d['slo_ms'] / 1000:.1f}s", d["first_slo_breach_at"],
              "(threshold set by --slo)")
     idles = [x["min_idle"] for x in rungs if x["min_idle"] is not None]
     line("box out of CPU", d["first_saturation_at"],
-         f"(lowest idle seen {min(idles)}%)" if idles else "")
+         f"(lowest idle seen {min(idles)}%, sustained)" if idles else "")
 
     if d["ceiling_by_group"]:
         w("\n  Extrapolating the fitted CPU slopes:")
@@ -621,6 +687,32 @@ def render_ladder(d):
         w("  across every answered turn at every rung:")
         w(f"    wait = {p['intercept']:.0f}ms + {p['slope']:.0f}ms per request in flight"
           f"   (R2 {p['r2']}, {p['n']} turns, {p['x_min']}-{p['x_max']} in flight)")
+        if p["r2"] is not None and p["r2"] < 0.3:
+            w("    R2 is low. Turns are not interchangeable - a name lookup is not a")
+            w("    yes/no - so pooling them buries load under the difference between")
+            w("    turns. The per-turn table below holds the work constant instead.")
+
+    fits = d.get("turn_fits") or {}
+    if fits:
+        w("\n  per turn, across the rungs (same question each time, rising load):")
+        w(f"    {'turn':<7}{'calls':<12}{'at low load':<15}{'at high load':<15}"
+          f"{'growth':<10}{'per call':<11}{'fit':<7}")
+        for k in sorted(fits, key=int):
+            f = fits[k]
+            # Not every turn survives to the top rung, so each row names the
+            # call range it was actually measured over.
+            span = "{}-{}".format(f["x_min"], f["x_max"])
+            w(f"    {k:<7}{span:<12}"
+              f"{ms(f['base_p50'], 15)}{ms(f['top_p50'], 15)}"
+              f"{(str(f['growth']) + 'x' if f['growth'] else '-'):<10}"
+              f"{str(round(f['slope'])) + 'ms':<11}"
+              f"{(str(f['r2']) if f['r2'] is not None else '-'):<7}")
+        worst = max(fits.items(), key=lambda kv: kv[1]["growth"] or 0)
+        if worst[1]["growth"]:
+            w(f"     Turn {worst[0]} degrades hardest, {worst[1]['growth']}x across its range."
+              f" A turn that grows")
+            w("     far faster than the rest points at one backend step rather than at")
+            w("     the system as a whole.")
 
     first, last = rungs[0], rungs[-1]
     if d["silence_timer_ms"] and first["pipeline_p50"] and last["pipeline_p50"]:

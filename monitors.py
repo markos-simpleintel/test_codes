@@ -48,6 +48,12 @@ DEFAULT_GROUPS = [
     ("orbitty",      re.compile(r"RoutingAI/orbitty")),
 ]
 
+# The channel sampler shells out to `asterisk -rx` every couple of seconds, and
+# that matches the asterisk pattern above - so the measuring instrument was
+# being counted as part of the thing measured, inflating both asterisk's CPU
+# and its process count. Anything matching here belongs to no group.
+IGNORE = re.compile(r"asterisk\s+-rx")
+
 
 class CpuSampler(threading.Thread):
     """Samples per-process CPU into groups. Percentages are per-core, matching
@@ -114,6 +120,8 @@ class CpuSampler(threading.Thread):
         self._stop.set()
 
     def _classify(self, cmd):
+        if IGNORE.search(cmd):
+            return None
         for name, pattern in self.groups:
             if pattern.search(cmd):
                 return name
