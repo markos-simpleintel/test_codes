@@ -14,7 +14,6 @@ so this cannot change how the test itself behaves.
 """
 
 import argparse
-import _thread
 import json
 import os
 import statistics
@@ -365,49 +364,72 @@ def _release_calls():
             pass
 
 
-def _stall_watchdog(rec, timeout, stop_evt):
-    """End a run that has quietly died.
+def _supervise(driver, done, rec, expected_calls, stall_timeout, teardown_grace):
+    """Wait for the run to be over, and refuse to wait forever for pjsua2.
 
-    runner.main() waits until every call reports disconnected, or
-    MAX_CALL_SECONDS (30 minutes) elapses. A call whose DISCONNECTED callback
-    never fires holds the whole run open with nothing happening - Asterisk shows
-    zero channels while the harness sits there. Interrupting the main thread
-    trips runner's own KeyboardInterrupt handler, so teardown and the report
-    still happen normally.
+    runner.main() runs on a worker thread so the report is not hostage to its
+    teardown. Endpoint destruction deadlocks reliably at this call count, and
+    killing the process is what has been costing us the numbers. The
+    measurement is complete once the last call ends; what the SIP client does
+    with its own mutexes afterwards is not part of the result.
+
+    Returns why the run ended.
     """
-    while not stop_evt.wait(2.0):
-        events = rec.events
+    def ended():
+        return sum(1 for e in list(rec.events) if e.get("kind") == "call_end")
+
+    while True:
+        if done.wait(2.0):
+            return "runner returned"
+
+        events = list(rec.events)
         last = events[-1]["t"] if events else None
-        if last is None:
-            continue
-        idle = time.time() - last
-        if idle > timeout:
+
+        if expected_calls and ended() >= expected_calls:
             _release_calls()
-            print(f"\n*** no call activity for {int(idle)}s - ending the run "
+            if done.wait(teardown_grace):
+                return "runner returned"
+            print(f"\n*** all {expected_calls} calls ended; pjsua2 teardown has not "
+                  f"returned after {teardown_grace}s - reporting without it",
+                  file=sys.stderr)
+            return "teardown hung"
+
+        if last is not None and time.time() - last > stall_timeout:
+            idle = int(time.time() - last)
+            _release_calls()
+            print(f"\n*** no call activity for {idle}s - ending the run "
                   f"(raise --stall-timeout if calls are legitimately this quiet)",
                   file=sys.stderr)
-            _thread.interrupt_main()
-            return
+            if done.wait(teardown_grace):
+                return "runner returned after stall"
+            return "stalled, teardown hung"
 
-
-def _check_sip_port_free():
+def _check_sip_port_free(wait_s=0):
     """A previous run still holding the SIP port fails deep inside pjsua2 as
     'bind() error: Address already in use', which says nothing about the cause.
-    Check first and name it."""
+    Check first and name it.
+
+    A level that exits hard can hold the port for a moment after the process is
+    gone, so a ladder waits rather than dropping the next rung.
+    """
     import socket
     import config
-    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        probe.bind(("", config.LOCAL_SIP_PORT))
-        return None
-    except OSError:
-        return (f"SIP port {config.LOCAL_SIP_PORT} is already in use - a previous "
-                f"run is probably still alive.\n"
-                f"    ss -lunp | grep {config.LOCAL_SIP_PORT}\n"
-                f"    pkill -9 -f evaluate.py; pkill -9 -f runner.py")
-    finally:
-        probe.close()
+    deadline = time.time() + wait_s
+    while True:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            probe.bind(("", config.LOCAL_SIP_PORT))
+            return None
+        except OSError:
+            if time.time() >= deadline:
+                return (f"SIP port {config.LOCAL_SIP_PORT} is in use - a previous run is "
+                        f"probably still alive."
+                        f"\n    ss -lunp | grep {config.LOCAL_SIP_PORT}"
+                        f"\n    pkill -9 -f evaluate.py; pkill -9 -f runner.py")
+            time.sleep(1.0)
+        finally:
+            probe.close()
 
 
 def run_one(n, args, outdir):
@@ -442,11 +464,6 @@ def run_one(n, args, outdir):
     except (ValueError, OSError):
         pass
 
-    stall_stop = threading.Event()
-    threading.Thread(target=_stall_watchdog,
-                     args=(rec, args.stall_timeout, stall_stop),
-                     daemon=True).start()
-
     time.sleep(1.0)
 
     # runner.py's own entry point wraps main() in the file logger; calling
@@ -455,19 +472,37 @@ def run_one(n, args, outdir):
     os.environ["RUNNER_LOG_FILE"] = str(outdir / f"{args.label}-{n}calls.runner.log")
     from run_logging import setup_run_logging
     import runner
+
+    done = threading.Event()
+
+    def _drive():
+        try:
+            with setup_run_logging():
+                runner.main()
+        except BaseException as e:                          # noqa: BLE001
+            print(f"*** runner ended: {type(e).__name__}: {e}", file=sys.stderr)
+        finally:
+            done.set()
+
     t0 = time.time()
+    driver = threading.Thread(target=_drive, name="runner", daemon=True)
+    driver.start()
+
     try:
-        with setup_run_logging():
-            runner.main()
-    finally:
-        wall = time.time() - t0
-        stall_stop.set()
-        LIVE_CALLS.clear()
-        cpu.stop()
-        chan.stop()
-        cpu.close_stream()
-        chan.close_stream()
-        time.sleep(args.cpu_interval * 2)
+        end_reason = _supervise(driver, done, rec, n, args.stall_timeout,
+                                args.teardown_grace)
+    except KeyboardInterrupt:
+        _release_calls()
+        end_reason = "interrupted"
+
+    wall = time.time() - t0
+    LIVE_CALLS.clear()
+    cpu.stop()
+    chan.stop()
+    cpu.close_stream()
+    chan.close_stream()
+    time.sleep(args.cpu_interval * 2)
+    print(f"*** run ended: {end_reason}   ({wall:.0f}s)", file=sys.stderr)
 
     if cpu.error:
         print(f"*** CPU sampler error: {cpu.error}", file=sys.stderr)
@@ -501,6 +536,16 @@ def run_one(n, args, outdir):
     with open(f"{stem}.txt", "w", encoding="utf-8") as f:
         f.write(text)
     print(f"  wrote {stem}.{{txt,json,turns.csv,cpu.csv,events.ndjson,runner.log}}\n")
+    if driver.is_alive():
+        # Everything above is on disk. A stuck pjsua2 teardown is a client-side
+        # hang with no bearing on the calls, and waiting it out is what has been
+        # forcing runs to be killed before they could report.
+        print("*** pjsua2 has not finished shutting down - exiting hard. The results "
+              "above are complete; this is\n*** the SIP client's own teardown, not a "
+              "call failure.", file=sys.stderr)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
     return report
 
 
@@ -516,6 +561,9 @@ def main():
     ap.add_argument("--stall-timeout", type=int, default=120,
                     help="end the run after this many seconds with no call activity "
                          "(default 120; the per-turn wait can legitimately reach 60)")
+    ap.add_argument("--teardown-grace", type=int, default=25,
+                    help="seconds to let pjsua2 shut down after the last call "
+                         "ends before writing the report and exiting anyway")
     ap.add_argument("--settle", type=int, default=30,
                     help="seconds between levels in a ladder")
     ap.add_argument("--out", default="results")
@@ -527,7 +575,7 @@ def main():
     outdir = Path(args.out)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    busy = _check_sip_port_free()
+    busy = _check_sip_port_free(wait_s=20)
     if busy:
         sys.exit(f"\nERROR: {busy}\n")
 
@@ -539,7 +587,9 @@ def main():
         for i, n in enumerate(levels):
             os.system(f"{sys.executable} {here} --calls {n} --label {args.label} "
                       f"--out {args.out} --cpu-interval {args.cpu_interval} "
-                      f"--channel-interval {args.channel_interval}"
+                      f"--channel-interval {args.channel_interval} "
+                      f"--stall-timeout {args.stall_timeout} "
+                      f"--teardown-grace {args.teardown_grace}"
                       + (f" --gap {args.gap}" if args.gap else ""))
             if i < len(levels) - 1:
                 time.sleep(args.settle)
