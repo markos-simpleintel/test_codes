@@ -631,7 +631,24 @@ class MyCall(pj.Call):
         # last line is "starting next action" got no further than here, and
         # until now there was no way to tell which of the two it was.
         self.log(f"start_next_action: entering (action_idx={self.action_idx})")
-        with self._lock:
+
+        # Measurement, not a fix. Every guard inside this function has been ruled
+        # out by the run logs - no disconnects, no transfers, no exhausted script
+        # - which leaves acquiring this lock as the only way a turn can enter
+        # here and never reach the keepalive stop. A plain `with` cannot show
+        # that: if it blocks forever there is nothing to log. A timed acquire
+        # reports the wait, and says so outright when it gives up.
+        _t0 = time.time()
+        _got = self._lock.acquire(timeout=10.0)
+        _waited = time.time() - _t0
+        if not _got:
+            self.log(f"*** BLOCKED on the call lock for {_waited:.1f}s in "
+                     f"start_next_action - this turn is lost. Something else holds "
+                     f"this call's lock; onFrameReceived takes it on every RTP frame.")
+            return
+        if _waited > 0.05:
+            self.log(f"start_next_action: waited {_waited * 1000:.0f}ms for the call lock")
+        try:
             if self.disconnected or self._transfer_detected or not self.call_audio:
                 # This returned in silence. A call that stops speaking mid-script
                 # looks identical from the outside to one that hung, and the
@@ -648,6 +665,8 @@ class MyCall(pj.Call):
             expected_idx = self.action_idx
             self.last_action_type = action_type
             call_audio = self.call_audio
+        finally:
+            self._lock.release()
 
         self.log(f"start_next_action: stopping keepalive before {action_type}")
         self.stop_rtp_keepalive()
