@@ -114,31 +114,68 @@ def audio_stats(path):
         return {"duration_s": round(n / rate, 2) if rate else 0, "rms": None,
                 "peak": None, "silence_frac": None}
 
-    import array
-    samples = array.array("h")
-    samples.frombytes(raw[:len(raw) - (len(raw) % 2)])
-    if sys.byteorder == "big":
-        samples.byteswap()
-    if not samples:
+    raw = raw[:len(raw) - (len(raw) % 2)]
+    n_samples = len(raw) // 2
+    if not n_samples:
         return {"duration_s": 0.0, "rms": 0, "peak": 0, "silence_frac": 1.0}
 
-    peak = max(abs(s) for s in samples)
-    total = sum(s * s for s in samples)
-    rms = int((total / len(samples)) ** 0.5)
+    # audioop does these in C. The pure-Python version walked every sample three
+    # times and sliced an array per 32ms frame, which on six hundred recordings
+    # is tens of millions of interpreted operations.
+    try:
+        import audioop
+        peak = audioop.max(raw, 2)
+        rms = audioop.rms(raw, 2)
+        frame_bytes = max(2, (rate * 32 // 1000) * 2)
+        quiet = frames = 0
+        for i in range(0, len(raw) - frame_bytes + 1, frame_bytes):
+            frames += 1
+            if audioop.max(raw[i:i + frame_bytes], 2) < 200:
+                quiet += 1
+    except ImportError:                       # audioop is gone in 3.13
+        import array
+        samples = array.array("h")
+        samples.frombytes(raw)
+        if sys.byteorder == "big":
+            samples.byteswap()
+        peak = max(abs(s) for s in samples)
+        rms = int((sum(s * s for s in samples) / len(samples)) ** 0.5)
+        frame = max(1, rate * 32 // 1000)
+        quiet = frames = 0
+        for i in range(0, len(samples) - frame, frame):
+            frames += 1
+            if max(abs(s) for s in samples[i:i + frame]) < 200:
+                quiet += 1
 
-    # Silence measured in 32ms frames, the same unit the VAD works in.
-    frame = max(1, rate * 32 // 1000)
-    quiet = frames = 0
-    for i in range(0, len(samples) - frame, frame):
-        frames += 1
-        if max(abs(s) for s in samples[i:i + frame]) < 200:
-            quiet += 1
     return {
-        "duration_s": round(len(samples) / rate, 2),
+        "duration_s": round(n_samples / rate, 2),
         "rms": rms,
         "peak": peak,
         "silence_frac": round(quiet / frames, 2) if frames else None,
     }
+
+
+_RECORDING_INDEX = {}
+
+
+def _index_recordings(sounds_dir):
+    """Map every input recording under the sounds tree by filename, once.
+
+    The sounds directory gains a folder per call and is never pruned, so it
+    holds every session from every run ever made. Walking it once and keeping
+    the names costs one pass; the recursive glob this replaces walked the whole
+    tree again for every turn that missed its direct path.
+    """
+    key = str(sounds_dir)
+    if key in _RECORDING_INDEX:
+        return _RECORDING_INDEX[key]
+    index = {}
+    for root, _dirs, files in os.walk(sounds_dir):
+        for name in files:
+            if name.endswith("_input_raw.wav"):
+                index.setdefault(name, os.path.join(root, name))
+    _RECORDING_INDEX[key] = index
+    return index
 
 
 def find_recording(sounds_dir, session_prefix, interaction):
@@ -149,8 +186,8 @@ def find_recording(sounds_dir, session_prefix, interaction):
     direct = Path(sounds_dir) / session_prefix / name
     if direct.exists():
         return direct
-    hits = glob.glob(str(Path(sounds_dir) / "**" / name), recursive=True)
-    return Path(hits[0]) if hits else None
+    hit = _index_recordings(sounds_dir).get(name)
+    return Path(hit) if hit else None
 
 
 def concurrency_from_run(run):
@@ -209,13 +246,28 @@ def concurrency_from_log(records, window=30.0):
             stamps.append(None)
     for r, s in zip(records, stamps):
         r["_epoch"] = s
+
+    # A sliding window over the records in time order. Comparing every record
+    # against every other is fine for one run's worth and hopeless against
+    # ai_curl.log, which is append-only and holds every run ever made.
+    from collections import Counter
+    timed = sorted((s, i) for i, s in enumerate(stamps) if s is not None)
+    live = Counter()
+    lo = hi = 0
+    for s, i in timed:
+        while hi < len(timed) and timed[hi][0] <= s + window:
+            live[records[timed[hi][1]]["session"]] += 1
+            hi += 1
+        while lo < len(timed) and timed[lo][0] < s - window:
+            sess = records[timed[lo][1]]["session"]
+            live[sess] -= 1
+            if live[sess] <= 0:
+                del live[sess]
+            lo += 1
+        records[i]["_est_concurrent"] = len(live)
     for r, s in zip(records, stamps):
         if s is None:
             r["_est_concurrent"] = None
-            continue
-        r["_est_concurrent"] = len({
-            o["session"] for o, os_ in zip(records, stamps)
-            if os_ is not None and abs(os_ - s) <= window})
     return records
 
 
