@@ -260,18 +260,22 @@ def idle_by_wallclock(run):
 
 
 def source_durations(input_dir):
-    """How long each recording we play actually is."""
+    """How much SPEECH is in each recording we play, not how long the file is.
+
+    A file is mostly padding: yes.wav is 0.76s long and holds about 0.2s of
+    sound. Comparing a recording's speech against the file's total length
+    scores a perfect capture at 0.25 and calls it broken - which is what it did,
+    identically at one call and at thirty, because it was measuring the files
+    rather than the system.
+    """
     out = {}
     base = Path(input_dir)
     if not base.is_dir():
         return out
     for wav in base.glob("*.wav"):
-        try:
-            with wave.open(str(wav), "rb") as w:
-                rate = w.getframerate()
-                out[wav.name] = round(w.getnframes() / rate, 2) if rate else None
-        except (OSError, wave.Error):
-            continue
+        st = audio_stats(wav)
+        if st and st.get("speech_s"):
+            out[wav.name] = st["speech_s"]
     return out
 
 
@@ -570,12 +574,12 @@ def report(rows, args):
             r["_ratio"] = r["audio_speech_s"] / r["sent_secs"]
         good = [r for r in graded if 0.7 <= r["_ratio"] <= 1.4]
         w("\nDID THE RECORDING HOLD WHAT WE SAID?")
-        w("  Speech in the recording, with the trailing silence timer removed,")
-        w("  against the length of the file we played. Near 1.0 is right. Well")
+        w("  Speech in the recording against speech in the file we played, both")
+        w("  measured the same way with silence removed. Near 1.0 is right. Well")
         w("  under means it was cut off; well over means it caught something extra.")
         w(f"\n  turns graded             {len(graded)}")
         w(f"  recordings that match    {len(good)} ({len(good) / len(graded):.0%})")
-        w(f"\n    {'turn':<7}{'we sent':<11}{'speech heard':<15}{'ratio':<9}{'wrong':<8}")
+        w(f"\n    {'turn':<7}{'we spoke':<11}{'speech heard':<15}{'ratio':<9}{'wrong':<8}")
         by_turn = {}
         for r in graded:
             by_turn.setdefault(r["turn"], []).append(r)
