@@ -1204,13 +1204,14 @@ def run_one(n, args, outdir):
 
     with open(f"{stem}.turns.csv", "w", encoding="utf-8") as f:
         f.write("call_id,turn,action_type,action,response_ms,remote_speech_ms,"
-                "turn_total_ms,detected_by,calls_up,inflight\n")
+                "turn_total_ms,detected_by,calls_up,inflight,tx_packets,tx_seconds\n")
         for t in report["turns"]:
             f.write(f"{t['call_id']},{t.get('turn','')},{t.get('action_type','')},"
                     f"\"{t.get('action','')}\",{t.get('response_ms','')},"
                     f"{t.get('remote_speech_ms','')},{t.get('turn_total_ms','')},"
                     f"{t.get('detected_by','')},{t.get('calls_up','')},"
-                    f"{t.get('inflight','')}\n")
+                    f"{t.get('inflight','')},{t.get('tx_packets','')},"
+                    f"{t.get('tx_seconds','')}\n")
 
     write_calls_csv(f"{stem}.calls.csv", report)
 
