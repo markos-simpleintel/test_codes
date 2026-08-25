@@ -626,8 +626,20 @@ class MyCall(pj.Call):
         self.on_action_complete(expected_idx=expected_idx)
 
     def start_next_action(self):
+        # Logged before the lock, because taking the lock is itself a place this
+        # can stop: the media thread grabs it on every RTP frame. A call whose
+        # last line is "starting next action" got no further than here, and
+        # until now there was no way to tell which of the two it was.
+        self.log(f"start_next_action: entering (action_idx={self.action_idx})")
         with self._lock:
             if self.disconnected or self._transfer_detected or not self.call_audio:
+                # This returned in silence. A call that stops speaking mid-script
+                # looks identical from the outside to one that hung, and the
+                # difference is the whole diagnosis.
+                self.log(
+                    f"NOT starting next action: disconnected={self.disconnected} "
+                    f"transfer_detected={self._transfer_detected} "
+                    f"have_call_audio={self.call_audio is not None}")
                 return
             if self.action_idx >= len(self.actions):
                 self.log("all actions finished")
@@ -637,6 +649,7 @@ class MyCall(pj.Call):
             self.last_action_type = action_type
             call_audio = self.call_audio
 
+        self.log(f"start_next_action: stopping keepalive before {action_type}")
         self.stop_rtp_keepalive()
 
         if action_type == "wav":
