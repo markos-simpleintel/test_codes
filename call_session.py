@@ -1,4 +1,5 @@
 import math
+import os
 import struct
 import threading
 import time
@@ -267,6 +268,11 @@ class MyCall(pj.Call):
         else:
             self.log("transfer detected; leaving call connected because HANGUP_ON_AMI_TRANSFER=0")
 
+    # Set RELEASE_RETIRED_PLAYERS=0 to restore the original behaviour of simply
+    # dropping the reference. Kept as a switch so this change can be measured
+    # against the code it replaced without a rebuild or a checkout.
+    RELEASE_RETIRED = os.getenv("RELEASE_RETIRED_PLAYERS", "1").strip() != "0"
+
     def _release_retired_players(self):
         """Disconnect finished players from the conference bridge.
 
@@ -280,6 +286,8 @@ class MyCall(pj.Call):
             retired = self._retired_players
             self._retired_players = []
             call_audio = self.call_audio
+        if not self.RELEASE_RETIRED:
+            return                      # dropped, exactly as before this change
         for player in retired:
             # Nothing in here may raise. This runs on the path that starts the
             # next turn, and an exception escaping it kills the wait thread, so
