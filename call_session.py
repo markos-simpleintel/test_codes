@@ -109,11 +109,6 @@ class MyCall(pj.Call):
         self.player = None
         self.keepalive_player = None
         self.remote_tap = None
-        # Players whose audio has finished but which are still connected to the
-        # conference bridge. pjsua2 warns against destroying a player inside its
-        # own EOF callback, so they are disconnected on the next action instead -
-        # a different thread, after the callback has returned.
-        self._retired_players = []
 
         self.action_idx = 0
         self.last_action_type = None
@@ -167,20 +162,12 @@ class MyCall(pj.Call):
             self._stop_evt.set()
             self.stop_rtp_keepalive()
             with self._lock:
-                # The last turn's player is still on the retirement list. Left
-                # there it outlives the call and gets destroyed at interpreter
-                # shutdown, after pjsua2 has torn the conference down - and
-                # removing a port from a conference that no longer exists aborts
-                # on an assertion in pjmedia_conf_remove_port.
-                if self.player is not None:
-                    self._retired_players.append(self.player)
                 self.call_audio = None
                 self.player = None
                 self.remote_tap = None
                 self._waiting_for_remote = False
                 self.current_wait_requires_prompt_start = False
                 self.current_wait_merge_bridge_gap = False
-            self._release_retired_players()
             self.release_pjsua2_ownership()
 
     def start_transfer_monitor(self):
@@ -276,36 +263,6 @@ class MyCall(pj.Call):
         else:
             self.log("transfer detected; leaving call connected because HANGUP_ON_AMI_TRANSFER=0")
 
-    # Set RELEASE_RETIRED_PLAYERS=0 to restore the original behaviour of simply
-    # dropping the reference. Kept as a switch so this change can be measured
-    # against the code it replaced without a rebuild or a checkout.
-    RELEASE_RETIRED = os.getenv("RELEASE_RETIRED_PLAYERS", "1").strip() != "0"
-
-    def _release_retired_players(self):
-        """Let finished players be destroyed, off the callback that finished them.
-
-        The original code cleared self.player inside on_action_complete, which
-        runs inside the player's own onEof2. That drops the last reference there
-        and then, whenever the destructor runs, pjsua2 tears the player down from
-        within its own EOF callback - which it warns against.
-
-        Holding the player in a list and clearing that list on the next action
-        moves the destruction onto an ordinary thread instead. Nothing here calls
-        stopTransmit: the destructor already removes the conference port, and
-        removing it twice aborts the process on an assertion in
-        pjmedia_conf_remove_port.
-        """
-        with self._lock:
-            retired = self._retired_players
-            self._retired_players = []
-        if not self.RELEASE_RETIRED:
-            return                      # dropped, exactly as before this change
-        # Simply going out of scope here is the point: the reference dies on this
-        # thread rather than inside onEof2. The owner back-reference is left
-        # alone, since MyCall.player was already cleared and clearing it would
-        # break onEof2 if it fired once more.
-        del retired[:]
-
     def stop_current_audio(self):
         with self._lock:
             player = self.player
@@ -321,7 +278,6 @@ class MyCall(pj.Call):
                     self.log(f"{label} stopped")
                 except pj.Error as e:
                     self.log(f"{label} stop warning: {e}")
-        self._release_retired_players()
 
     def onCallMediaState(self, prm):
         ci = self.getInfo()
@@ -681,8 +637,6 @@ class MyCall(pj.Call):
             self.last_action_type = action_type
             call_audio = self.call_audio
 
-        # Free the previous turn's bridge slot before claiming another one.
-        self._release_retired_players()
         self.stop_rtp_keepalive()
 
         if action_type == "wav":
@@ -722,12 +676,6 @@ class MyCall(pj.Call):
             if self._transfer_detected:
                 return
             self.action_idx += 1
-            # Was `self.player = None`, which dropped the reference while the
-            # player was still connected to the bridge. Every other cleanup path
-            # in this file calls stopTransmit; this one, the one that runs on
-            # every single turn, did not.
-            if self.player is not None:
-                self._retired_players.append(self.player)
             self.player = None
 
             if self.disconnected:
