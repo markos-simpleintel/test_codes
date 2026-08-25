@@ -95,6 +95,7 @@ class RunMetrics:
                         # RTP counters, before and after our audio played.
                         "tx_pkt_start": e.get("tx_pkt"),
                         "tx_pkt_end": None,
+                        "conf_ports": e.get("conf_ports"),
                         "tx_loss_start": e.get("tx_loss"),
                         "tx_loss_end": None,
                     }

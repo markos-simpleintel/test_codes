@@ -123,6 +123,22 @@ def _install(num_calls, gap_ms):
             if self.media_ready:
                 RECORDER.record("call_media_ready", call_id=self.call_id)
 
+        def _conf_ports(self):
+            """How many ports the conference bridge currently holds.
+
+            Every turn creates two players - the recording and the keepalive -
+            and drops both references. If pjsua2's director layer keeps them
+            alive, each one keeps a bridge port, and the count climbs for the
+            life of the call. That would explain a player running its full
+            length while its audio reaches nothing, and it getting worse the
+            deeper into a call you are, which is exactly the shape the silence
+            has. Counting the ports settles it either way.
+            """
+            try:
+                return len(self.ep.mediaEnumPorts2())
+            except Exception:                               # noqa: BLE001
+                return None
+
         def _rtp_counters(self):
             """What this call has sent, and how much of it Asterisk did not get.
 
@@ -149,6 +165,7 @@ def _install(num_calls, gap_ms):
                 a_type, a_val = self.actions[idx]
                 RECORDER.record("action_start", call_id=self.call_id, turn=idx,
                                 action_type=a_type, action=str(a_val)[-40:],
+                                conf_ports=self._conf_ports(),
                                 **self._rtp_counters())
             return super().start_next_action()
 
@@ -689,6 +706,31 @@ def render(r):
         w("     and sends that silence to be transcribed - however good our audio was.")
         if mine["too_late"]:
             w(f"     Affected calls: {', '.join(str(c) for c in mine['too_late_calls'][:15])}")
+
+    ports = [(t.get("turn"), t["conf_ports"]) for t in r.get("turns") or []
+             if t.get("conf_ports") is not None]
+    if len(ports) >= 10:
+        by_turn = {}
+        for turn, n in ports:
+            by_turn.setdefault(turn, []).append(n)
+        first = statistics.median(by_turn[min(by_turn)])
+        last = statistics.median(by_turn[max(by_turn)])
+        w("\nCONFERENCE PORTS IN USE  (counted as each turn starts)")
+        w(f"    {'turn':<8}{'median ports':<15}{'most':<8}")
+        for k in sorted(by_turn)[:18]:
+            v = by_turn[k]
+            w(f"    {k:<8}{statistics.median(v):<15.0f}{max(v):<8}")
+        w(f"\n     turn {min(by_turn)}: {first:.0f} ports"
+          f"    turn {max(by_turn)}: {last:.0f} ports")
+        if last > first * 1.5:
+            w("     Ports are accumulating over the life of a call. Every turn creates")
+            w("     a player for the recording and another for the keepalive, and drops")
+            w("     both references - if they are not being destroyed, each one keeps a")
+            w("     bridge port. A player can then run its whole file while its audio")
+            w("     reaches nothing, which is what the silence looks like from here.")
+        else:
+            w("     Ports are not accumulating, so players are being freed. Whatever")
+            w("     stops the audio arriving is not the bridge filling up.")
 
     pb = r.get("playback") or {}
     if pb.get("turns"):
