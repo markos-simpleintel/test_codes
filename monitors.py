@@ -107,7 +107,7 @@ IGNORE = re.compile(r"asterisk\s+-rx|\brasterisk\b")
 
 # Leading columns of the streamed CSV, ahead of the per-group ones. Named here
 # so the reader can tell a fixed column from a group without counting positions.
-FIXED_COLUMNS = ("rel_s", "ncpu", "busy_pct", "idle_pct", "steal_pct", "untracked_pct")
+FIXED_COLUMNS = ("rel_s", "ncpu", "busy_pct", "idle_pct", "steal_pct", "untracked_pct", "scan_ms")
 
 
 class CpuSampler(threading.Thread):
@@ -174,7 +174,8 @@ class CpuSampler(threading.Thread):
             return
         try:
             row = ([sample["rel"], self.ncpu, sample["busy_pct"], sample["idle_pct"],
-                    sample.get("steal_pct", 0), sample.get("untracked_pct", 0)]
+                    sample.get("steal_pct", 0), sample.get("untracked_pct", 0),
+                    sample.get("scan_ms", 0)]
                    + [sample["groups"].get(n, 0) for n in self._names]
                    + [sample["counts"].get(n, 0) for n in self._names]
                    + [sample["spawned"].get(n, 0) for n in self._names])
@@ -231,11 +232,20 @@ class CpuSampler(threading.Thread):
 
     def run(self):
         try:
-            prev_t = _cpu_times()
+            # /proc/stat is read AFTER the process scan, not before it.
+            #
+            # The scan reads a few hundred /proc/pid/stat files and takes longer
+            # the busier the box is. With the total read first, the per-process
+            # deltas covered a window that ran past the one they were divided by,
+            # so percentages inflated exactly when the box was loaded - which is
+            # how a single group came to report 580% of a 400% machine.
             prev = self._snapshot()
+            prev_t = _cpu_times()
             while not self._stop.wait(self.interval):
-                cur_t = _cpu_times()
+                scan_started = time.time()
                 cur = self._snapshot()
+                scan_ms = round((time.time() - scan_started) * 1000, 1)
+                cur_t = _cpu_times()
                 dt = cur_t["total"] - prev_t["total"]
                 if dt <= 0:
                     prev_t, prev = cur_t, cur
@@ -282,6 +292,10 @@ class CpuSampler(threading.Thread):
                     "idle_pct": round(idle, 1),
                     "steal_pct": round(steal, 1),
                     "untracked_pct": round(untracked, 1),
+                    # How long the scan itself took. If this approaches the
+                    # sampling interval the numbers are being read too slowly to
+                    # trust, and that should be visible rather than inferred.
+                    "scan_ms": scan_ms,
                     "spawned": {g: len(v) for g, v in self.pids_seen.items()},
                 }
                 self.samples.append(sample)

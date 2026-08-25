@@ -404,6 +404,7 @@ def build_report(label, requested, rec, cpu, chan, ncpu, wall_s,
     capacity = getattr(cpu, "capacity_pct", None) or 100.0 * ncpu
     saturated = [s for s in cpu.samples if s["idle_pct"] <= 0.05 * capacity]
     steals = [s.get("steal_pct", 0) for s in cpu.samples]
+    scans = [s.get("scan_ms", 0) for s in cpu.samples if s.get("scan_ms")]
     untracked = [s.get("untracked_pct", 0) for s in cpu.samples]
 
     return {
@@ -461,6 +462,8 @@ def build_report(label, requested, rec, cpu, chan, ncpu, wall_s,
             "other_processes": list(getattr(cpu, "other_top", []) or []),
             # Time the hypervisor took away. On a shared VM this is capacity the
             # box believes it has and does not.
+            "scan_ms_peak": round(max(scans), 1) if scans else None,
+            "scan_ms_mean": round(statistics.fmean(scans), 1) if scans else None,
             "steal_peak_pct": round(max(steals), 1) if steals else None,
             "steal_mean_pct": round(statistics.fmean(steals), 1) if steals else None,
         },
@@ -610,6 +613,17 @@ def render(r):
       f"   ({cpu['min_idle_pct']}% out of {cpu['box_capacity_pct']}%)")
     w(f"  near-saturated samples   {cpu['saturated_samples']} of {cpu['total_samples']}"
       f"   (under 5% of the box left free)")
+    over = [g for g, v in cpu["peak_by_group"].items()
+            if v > (cpu["box_capacity_pct"] or 0)]
+    if over or (cpu.get("scan_ms_peak") or 0) > 150:
+        w(f"  sampler scan time        {cpu.get('scan_ms_mean')}ms mean, "
+          f"{cpu.get('scan_ms_peak')}ms peak")
+        if over:
+            w(f"     {', '.join(over)} reported more than the whole box, which cannot")
+            w("     happen. The scan reads a few hundred /proc entries and slows down")
+            w("     as the box gets busy; when it runs long, the window the per-process")
+            w("     deltas cover outgrows the one they are divided by and percentages")
+            w("     inflate. Treat those peaks as upper bounds, not measurements.")
     if cpu.get("steal_peak_pct"):
         w(f"  hypervisor steal         {cpu['steal_mean_pct']}% mean, "
           f"{cpu['steal_peak_pct']}% peak")
