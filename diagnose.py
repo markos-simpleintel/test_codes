@@ -685,17 +685,33 @@ def report(rows, args):
                 w(f"    {name:<24}{len(v):<9}"
                   + f"{sil}/{len(v)} ({sil / len(v):.0%})".ljust(14))
             if len(seen) >= 2:
-                worst, best = seen[0], seen[-1]
-                if worst[1] > best[1] * 2 and worst[1] > 0.05:
-                    w("\n     Silence concentrates where the box had the least CPU free.")
+                rates = [x[1] for x in seen]
+                # Starvation would show a gradient: the less CPU was free, the
+                # more silence. Comparing only the first band against the last
+                # called a non-monotonic shape a trend, so the whole run of
+                # bands has to agree now.
+                falling = all(a >= b - 0.02 for a, b in zip(rates, rates[1:]))
+                spread = max(rates) - min(rates)
+                if falling and spread > 0.15:
+                    w("\n     Silence falls steadily as CPU frees up, across every band.")
                     w("     vad_bargein has to keep up with real time, and starved of CPU it")
                     w("     stops doing so - that is the link between load and hallucinated")
-                    w("     transcripts, and it means freeing CPU fixes accuracy, not just")
+                    w("     transcripts, and it means freeing CPU fixes accuracy as well as")
                     w("     capacity.")
-                elif worst[1] <= best[1] * 1.3:
+                elif spread <= 0.1:
                     w("\n     Silence happens at about the same rate whether the box was busy")
                     w("     or idle. CPU is not what causes it - freeing CPU will raise how")
                     w("     many calls you carry but will not fix the transcripts.")
+                else:
+                    worst = max(seen, key=lambda x: x[1])
+                    best = min(seen, key=lambda x: x[1])
+                    w(f"\n     No clean gradient. The worst band is '{worst[0]}' at {worst[1]:.0%}")
+                    w(f"     and the best is '{best[0]}' at {best[1]:.0%}, but the bands in between do")
+                    w("     not line up in order, which is not what starvation looks like -")
+                    w("     that would get steadily worse as headroom shrinks.")
+                    w("     Treat this as suggestive at most. CPU headroom also tracks how many")
+                    w("     calls are running and how far into them you are, so a difference")
+                    w("     between the busiest and quietest moments may be either of those.")
 
         by_turn = {}
         for r in rows:
