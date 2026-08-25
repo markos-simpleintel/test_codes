@@ -34,6 +34,10 @@ class AmiReadyEvents:
         self._channel_sequence = 0
         self._channel_events = []
         self._claimed_channel_keys = set()
+        # The dialplan sets SESSION and SESSION_PREFIX per call, and those are
+        # the ids Jane's logs and the session directories are named by. They
+        # arrive as VarSet events, which nothing else here looks at.
+        self._session_vars = {}
         self._login_response = None
         self._running = False
 
@@ -279,6 +283,9 @@ class AmiReadyEvents:
         if self.trace:
             print(f"*** AMI event: {self._summarize_event(msg)}")
 
+        if event.lower() == "varset":
+            self._note_session_var(msg)
+
         ready_matched = self._matches_ready_event(msg)
         transfer_matched = self._matches_transfer_event(msg)
         channel_matched = self._matches_channel_event(msg)
@@ -313,6 +320,28 @@ class AmiReadyEvents:
     # lists grow all run and every waiting call rescans all of them every 250ms
     # while holding the lock - so a long run slows down as it goes.
     MAX_RETAINED_EVENTS = 4000
+
+    SESSION_VARS = ("SESSION", "SESSION_PREFIX")
+
+    def _note_session_var(self, msg):
+        name = msg.get("Variable")
+        if name not in self.SESSION_VARS:
+            return
+        key = msg.get("Linkedid") or msg.get("Uniqueid")
+        if not key:
+            return
+        with self._cond:
+            if len(self._session_vars) > 5000:
+                self._session_vars.clear()      # a stray run should not grow forever
+            self._session_vars.setdefault(key, {})[name] = msg.get("Value", "")
+
+    def session_vars_for(self, *keys):
+        """SESSION / SESSION_PREFIX for whichever of these ids the PBX used."""
+        with self._cond:
+            for k in keys:
+                if k and k in self._session_vars:
+                    return dict(self._session_vars[k])
+        return {}
 
     def _prune_locked(self):
         for name in ("_ready_events", "_transfer_events", "_channel_events"):

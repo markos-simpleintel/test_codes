@@ -143,11 +143,22 @@ class RunMetrics:
             c = by_call.setdefault(cid, {
                 "call_id": cid, "started": None, "connected": None,
                 "media_ready": None, "ended": None, "end_reason": None,
-                "turns": 0,
+                "turns": 0, "caller": None, "identity": None,
+                "channel": None, "uniqueid": None, "linkedid": None,
+                "session": None, "session_prefix": None,
             })
             k = e["kind"]
+            if k == "call_session_id":
+                c["session"] = e.get("session") or c["session"]
+                c["session_prefix"] = e.get("session_prefix") or c["session_prefix"]
+            if k == "call_identity":
+                c["channel"] = e.get("channel") or c["channel"]
+                c["uniqueid"] = e.get("uniqueid") or c["uniqueid"]
+                c["linkedid"] = e.get("linkedid") or c["linkedid"]
             if k == "call_start" and c["started"] is None:
                 c["started"] = e["t"]
+                c["caller"] = e.get("caller")
+                c["identity"] = e.get("identity")
             elif k == "call_connected" and c["connected"] is None:
                 c["connected"] = e["t"]
             elif k == "call_media_ready" and c["media_ready"] is None:
@@ -308,6 +319,19 @@ class RunMetrics:
                 "turns_answered": len(answered),
                 "turns_unanswered": len(unanswered),
                 "duration_s": c["duration_s"],
+                # Carried so a degraded call in the report can be found again in
+                # Jane and in the PBX logs. Asterisk's uniqueid is <epoch>.<seq>,
+                # and the PBX names its session directory <caller>_<epoch><rand>,
+                # so the uniqueid locates the recordings for that exact call.
+                "caller": c.get("caller"),
+                "identity": c.get("identity"),
+                "session": c.get("session"),
+                "session_prefix": c.get("session_prefix"),
+                "channel": c.get("channel"),
+                "uniqueid": c.get("uniqueid"),
+                "linkedid": c.get("linkedid"),
+                "started": c.get("started"),
+                "last_turn": max((t.get("turn") or 0 for t in ts), default=None),
             })
         return out
 

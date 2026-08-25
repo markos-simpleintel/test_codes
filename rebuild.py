@@ -173,6 +173,8 @@ def main():
                     f"{t.get('detected_by','')},{t.get('calls_up','')},"
                     f"{t.get('inflight','')}\n")
 
+    evaluate.write_calls_csv(f"{stem}.calls.csv", report)
+
     text = evaluate.render(report)
     # A trace that stops early cannot distinguish a call the system abandoned
     # from one that was still going when the recording stopped. Both look

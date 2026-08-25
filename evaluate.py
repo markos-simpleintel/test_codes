@@ -56,7 +56,30 @@ def _install(num_calls, gap_ms):
             # wait_for_remote_turn_end - so a turn is only closed once.
             self._closed_turns = set()
 
+        def _record_session_once(self):
+            """The PBX's own SESSION id, once the dialplan has set it.
+
+            It is set a moment after the channel appears, so it is not available
+            at bind time - checked on each turn end instead, which is the first
+            point it is certainly there.
+            """
+            if getattr(self, "_session_logged", False):
+                return
+            listener = self.ami_ready_events
+            if listener is None:
+                return
+            try:
+                got = listener.session_vars_for(self.ami_linkedid, self.ami_uniqueid)
+            except Exception:                               # noqa: BLE001
+                return
+            if got.get("SESSION"):
+                self._session_logged = True
+                RECORDER.record("call_session_id", call_id=self.call_id,
+                                session=got.get("SESSION"),
+                                session_prefix=got.get("SESSION_PREFIX"))
+
         def _close_turn(self, turn, source, label):
+            self._record_session_once()
             if turn in self._closed_turns:
                 return
             self._closed_turns.add(turn)
@@ -65,8 +88,24 @@ def _install(num_calls, gap_ms):
 
         def start(self):
             LIVE_CALLS.append(self)
-            RECORDER.record("call_start", call_id=self.call_id)
+            import config
+            RECORDER.record("call_start", call_id=self.call_id,
+                            caller=config.CALLER_USER,
+                            identity=config.describe_identity(self.call_id))
             return super().start()
+
+        def bind_ami_channel(self):
+            # Asterisk's own handle for this call. Without it a degraded call in
+            # the report cannot be found again in Jane or in the PBX logs, which
+            # makes the degradation impossible to chase past the summary.
+            result = super().bind_ami_channel()
+            if self.ami_uniqueid and not getattr(self, "_identity_logged", False):
+                self._identity_logged = True
+                RECORDER.record("call_identity", call_id=self.call_id,
+                                channel=self.ami_channel,
+                                uniqueid=self.ami_uniqueid,
+                                linkedid=self.ami_linkedid)
+            return result
 
         def onCallState(self, prm):
             try:
@@ -380,6 +419,24 @@ def build_report(label, requested, rec, cpu, chan, ncpu, wall_s,
     }
 
 
+def write_calls_csv(path, report):
+    """One row per call, with the handles needed to find it in Jane and the PBX."""
+    cols = ["call_id", "verdict", "turns_answered", "turns_unanswered", "last_turn",
+            "duration_s", "session", "session_prefix", "caller", "uniqueid",
+            "linkedid", "channel", "identity", "started_epoch", "started_utc"]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(",".join(cols) + "\n")
+        for o in report["outcomes"]["per_call"]:
+            started = o.get("started")
+            row = dict(o)
+            row["started_epoch"] = int(started) if started else ""
+            row["started_utc"] = (time.strftime("%Y-%m-%dT%H:%M:%S",
+                                                time.localtime(started)) if started else "")
+            f.write(",".join(
+                "" if row.get(k) is None else str(row.get(k, "")).replace(",", " ")
+                for k in cols) + "\n")
+
+
 VERDICT_TEXT = {
     "never_connected": "the INVITE never reached a connected call",
     "no_media": "connected, but no audio path was ever established",
@@ -479,6 +536,46 @@ def render(r):
         w("     'processes started' counts distinct processes over the whole run. A")
         w("     group that starts a fresh one per turn pays its startup cost over and")
         w("     over, which shows up as a high peak against a low mean.")
+
+    per_call = out.get("per_call") or []
+    tpc = c.get("turns_per_call") or {}
+    if per_call and tpc.get("p50"):
+        # Calls that stopped short are the interesting ones and they do not show
+        # as failures, so they are named here with enough to find them again.
+        short = sorted((o for o in per_call
+                        if o["turns_answered"] and o["turns_answered"] < 0.6 * tpc["p50"]),
+                       key=lambda o: o["turns_answered"])
+        broken = [o for o in per_call if o["verdict"] != "completed"]
+        if short or broken:
+            w("\nCALLS TO GO AND LOOK AT")
+            def ident(o):
+                return (o.get("session_prefix") or o.get("session")
+                        or o.get("uniqueid") or "-")
+            if short:
+                w(f"  {len(short)} call(s) ended well short of the median "
+                  f"{tpc['p50']:.0f} turns:")
+                w(f"    {'call':<6}{'turns':<7}{'session':<26}{'uniqueid':<18}")
+                for o in short[:12]:
+                    w(f"    {o['call_id']:<6}{o['turns_answered']:<7}{ident(o):<26}"
+                      f"{o.get('uniqueid') or '-':<18}")
+                if len(short) > 12:
+                    w(f"    ... and {len(short) - 12} more - all of them in calls.csv")
+            if broken:
+                w(f"  {len(broken)} call(s) with a failure verdict:")
+                w(f"    {'call':<6}{'verdict':<22}{'session':<26}")
+                for o in broken[:12]:
+                    w(f"    {o['call_id']:<6}{o['verdict']:<22}{ident(o):<26}")
+            have_session = any(o.get("session") for o in per_call)
+            if have_session:
+                w("     'session' is the PBX's own SESSION id - the same one Jane logs")
+                w("     against and the session directory is named for:")
+                w("       ls -d /usr/local/share/asterisk/sounds/<session>")
+            else:
+                w("     No SESSION ids were captured. They come from AMI VarSet events,")
+                w("     so the AMI user needs the 'dialplan' read class in manager.conf")
+                w("     (and USE_AMI_READY_EVENTS on). Falling back to Asterisk uniqueid,")
+                w("     whose <epoch> prefix still locates the session directory:")
+                w("       ls -d /usr/local/share/asterisk/sounds/<caller>_<epoch>*")
 
     if r["projection"]:
         w("\nWHERE IT RUNS OUT  (CPU fitted against measured concurrency)")
@@ -908,6 +1005,8 @@ def run_one(n, args, outdir):
                     f"{t.get('remote_speech_ms','')},{t.get('turn_total_ms','')},"
                     f"{t.get('detected_by','')},{t.get('calls_up','')},"
                     f"{t.get('inflight','')}\n")
+
+    write_calls_csv(f"{stem}.calls.csv", report)
 
     # The sampler already streamed a richer cpu.csv - core count, busy percent,
     # per-group process counts. Rewriting it here replaced that with a narrower
