@@ -173,6 +173,15 @@ class RunMetrics:
             t["tx_lost"] = None
             t["tx_loss_pct"] = None
 
+        # How long the player actually ran, start to EOF.
+        #
+        # This is the only measure here that cannot be fooled by the keepalive.
+        # RTP packet counts never fall to zero because a silence file streams
+        # between turns, so "we transmitted" was true even when the recording
+        # never played. A player that reports finishing in a fraction of its
+        # file's length did not play it.
+        t["playback_ms"] = gap("action_start", "action_end")
+
         # Response latency: our audio stopped, how long until theirs started.
         t["response_ms"] = gap("action_end", "first_voice")
         # How long the far end then spoke for.

@@ -327,6 +327,43 @@ def project_ceiling(cpu_samples, ncpu, conc=None, capacity=None):
                                       r["projected_calls"] or 0))
 
 
+def summarize_playback(turns):
+    """Whether each turn's player actually ran for as long as its file.
+
+    The keepalive silence file streams between turns, so RTP never stops and
+    "we transmitted" stays true even when the recording never played. Time from
+    starting a player to its end-of-file cannot be fooled that way: a player
+    that reports finishing in a fraction of its file's length did not play it.
+    """
+    rows = [t for t in turns
+            if t.get("action_type") == "wav" and t.get("playback_ms") is not None]
+    if not rows:
+        return {}
+    by_file = {}
+    for t in rows:
+        name = str(t.get("action") or "").replace("\\", "/").split("/")[-1]
+        by_file.setdefault(name, []).append(t["playback_ms"])
+    # A file's own length is not known here, so the yardstick is what that same
+    # file usually takes. A turn far below its own median never played.
+    short = []
+    for t in rows:
+        name = str(t.get("action") or "").replace("\\", "/").split("/")[-1]
+        typical = statistics.median(by_file[name])
+        if typical > 0 and t["playback_ms"] < typical * 0.5:
+            short.append(t)
+    return {
+        "turns": len(rows),
+        "did_not_play": len(short),
+        "by_file": {k: {"count": len(v),
+                        "median_ms": round(statistics.median(v)),
+                        "min_ms": round(min(v))}
+                    for k, v in sorted(by_file.items())},
+        "by_turn": {str(k): v for k, v in sorted(
+            {t["turn"]: None for t in short}.items())},
+        "short_calls": sorted({t["call_id"] for t in short}),
+    }
+
+
 def summarize_transmission(turns):
     """What we actually sent, per turn, from the call's own RTP counter.
 
@@ -525,6 +562,7 @@ def build_report(label, requested, rec, cpu, chan, ncpu, wall_s,
             "too_late_calls": sorted({t["call_id"] for t in late}),
             "vs_load": reply_by_load,
         },
+        "playback": summarize_playback(turns),
         "transmitted": summarize_transmission(turns),
         "projection": project_ceiling(cpu.samples, ncpu, conc, capacity),
         "concurrency_timeline": conc,
@@ -651,6 +689,27 @@ def render(r):
         w("     and sends that silence to be transcribed - however good our audio was.")
         if mine["too_late"]:
             w(f"     Affected calls: {', '.join(str(c) for c in mine['too_late_calls'][:15])}")
+
+    pb = r.get("playback") or {}
+    if pb.get("turns"):
+        w("\nDID THE PLAYER ACTUALLY RUN?  (start of playback to end-of-file)")
+        w(f"  wav turns                {pb['turns']}")
+        w(f"  finished far too fast    {pb['did_not_play']}"
+          + ("   <-- these never played" if pb["did_not_play"] else ""))
+        w(f"\n    {'file':<22}{'plays':<8}{'typical':<12}{'fastest':<12}")
+        for name, v in pb["by_file"].items():
+            flag = "  <-- never played" if v["min_ms"] < v["median_ms"] * 0.5 else ""
+            w(f"    {name:<22}{v['count']:<8}{str(v['median_ms']) + 'ms':<12}"
+              f"{str(v['min_ms']) + 'ms':<12}{flag}")
+        w("\n     RTP packet counts cannot see this. A silence file streams between")
+        w("     turns as a keepalive, so the call never stops sending and 'we")
+        w("     transmitted' stays true whether the recording played or not. Time")
+        w("     from starting a player to its end-of-file can only be short if the")
+        w("     file did not play - and a turn that did not play is a turn the PBX")
+        w("     recorded as silence and sent to be transcribed.")
+        if pb["did_not_play"]:
+            w(f"     Calls affected: {', '.join(str(c) for c in pb['short_calls'][:15])}")
+            w(f"     Turns affected: {', '.join(pb['by_turn'])}")
 
     tx = r.get("transmitted") or {}
     if tx.get("turns"):
