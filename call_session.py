@@ -281,18 +281,19 @@ class MyCall(pj.Call):
             self._retired_players = []
             call_audio = self.call_audio
         for player in retired:
-            if call_audio is not None:
-                try:
-                    player.stopTransmit(call_audio)
-                except pj.Error as e:
-                    self.log(f"retired player disconnect warning: {describe_pj_error(e)}")
-            # FilePlayer holds a reference back to this call. Clearing it lets
-            # refcounting free the player now rather than at some later GC pass,
-            # which is what actually returns the bridge slot.
+            # Nothing in here may raise. This runs on the path that starts the
+            # next turn, and an exception escaping it kills the wait thread, so
+            # the call never speaks again and the whole run stalls out. A player
+            # that cannot be disconnected is not worth a turn - catch broadly and
+            # keep going.
             try:
-                player.owner = None
-            except AttributeError:
-                pass
+                if call_audio is not None:
+                    player.stopTransmit(call_audio)
+            except Exception as e:                          # noqa: BLE001
+                self.log(f"retired player disconnect warning: {e}")
+        # The owner back-reference is deliberately left alone. MyCall.player was
+        # already cleared, so there is no cycle and refcounting frees these on
+        # its own - and clearing it would break onEof2 if it fired once more.
 
     def stop_current_audio(self):
         with self._lock:
@@ -509,7 +510,17 @@ class MyCall(pj.Call):
             self.current_wait_merge_bridge_gap = False
 
         self.log(f"ready source={source} ({label}); starting next action")
-        self.start_next_action()
+        try:
+            self.start_next_action()
+        except Exception as e:                              # noqa: BLE001
+            # This runs on a daemon wait thread. An exception here used to kill
+            # that thread without a word, leaving the call connected but never
+            # speaking again - which looks like the far end going quiet rather
+            # than like a bug in here. Say so loudly instead.
+            import traceback
+            self.log(f"*** FAILED TO START NEXT ACTION: {type(e).__name__}: {e}")
+            for line in traceback.format_exc().splitlines():
+                self.log(f"    {line}")
 
     def remote_turn_ready_by_silence(self, label):
         now = time.time()
