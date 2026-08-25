@@ -389,6 +389,9 @@ def main():
         rows.append({
             "session": r.get("session"),
             "prefix": prefix,
+            # Wall-clock time of the turn, needed to line it up against things
+            # measured outside this row - CPU samples, and when other calls ended.
+            "_epoch": r.get("_epoch"),
             "inter": r["inter"],
             "turn": turn,
             "concurrency": conc,
@@ -412,7 +415,7 @@ def main():
     if not rows:
         sys.exit("no turns matched - check --run, --curl-log and --interaction-offset")
 
-    report(rows, args)
+    report(rows, args, run)
 
     if args.out:
         cols = sorted({k for r in rows for k in r})
@@ -424,7 +427,7 @@ def main():
         print(f"  wrote {args.out}\n")
 
 
-def report(rows, args):
+def report(rows, args, run=None):
     w = print
     w("\n" + "=" * 76)
     w(f"  AUDIO AND CONCURRENCY   {len(rows)} turns"
@@ -764,6 +767,54 @@ def report(rows, args):
                     w("     Treat this as suggestive at most. CPU headroom also tracks how many")
                     w("     calls are running and how far into them you are, so a difference")
                     w("     between the busiest and quietest moments may be either of those.")
+
+        # Does one call ending hurt the others? Calls start 200ms apart, so the
+        # early ones finish while the late ones are still going - and the
+        # silence spikes at exactly the turn depths where that would be
+        # happening. Turn number and "calls have started ending" are confounded
+        # by that stagger, so the way to separate them is to ask how many calls
+        # ended shortly before each turn, and whether that predicts silence.
+        ends = sorted(c["ended"] for c in ((run or {}).get("call_records") or [])
+                      if c.get("ended"))
+        timed = [r for r in rows if is_voice_turn(r) and r.get("_epoch")]
+        if ends and len(timed) >= 20:
+            import bisect
+            for r in timed:
+                lo = bisect.bisect_left(ends, r["_epoch"] - 20.0)
+                hi = bisect.bisect_right(ends, r["_epoch"])
+                r["_ended_recently"] = max(0, hi - lo)
+            bands = [(0, 0, "none"), (1, 2, "1-2"), (3, 5, "3-5"), (6, 99, "6+")]
+            w("\n  by how many other calls ended in the 20s before that turn:")
+            w(f"    {'calls just ended':<20}{'turns':<9}{'silent':<14}")
+            seen = []
+            for lo_n, hi_n, name in bands:
+                v = [r for r in timed if lo_n <= r["_ended_recently"] <= hi_n]
+                if not v:
+                    continue
+                sil = sum(1 for r in v if is_silent(r))
+                seen.append((name, sil / len(v), len(v)))
+                w(f"    {name:<20}{len(v):<9}"
+                  + f"{sil}/{len(v)} ({sil / len(v):.0%})".ljust(14))
+            if len(seen) >= 2:
+                rates = [x[1] for x in seen]
+                if max(rates) - min(rates) < 0.1:
+                    w("\n     Flat. Calls ending nearby makes no difference, so the damage")
+                    w("     is not being done by other calls finishing.")
+                else:
+                    w("\n     This rises - but it cannot be read as a cause. Calls start a")
+                    w("     fraction of a second apart, so every call sits at nearly the same")
+                    w("     turn at the same moment, and calls only begin ending once they")
+                    w("     are all deep into their scripts. 'Late in a call' and 'other")
+                    w("     calls are finishing' are the same instant here, and no")
+                    w("     correlation over this data can tell them apart.")
+                    w("\n     Separating them needs an experiment, not a statistic: start the")
+                    w("     calls far enough apart that they sit at different turns at the")
+                    w("     same time.")
+                    w("         python evaluate.py --calls 10 --gap 30000 --label stagger")
+                    w("     Thirty seconds apart puts the first call a dozen turns ahead of")
+                    w("     the last. If silence follows turn depth, the early calls go quiet")
+                    w("     while the late ones are still fine. If it follows calls ending,")
+                    w("     they all go quiet together the moment the first one hangs up.")
 
         by_turn = {}
         for r in rows:
