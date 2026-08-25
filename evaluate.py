@@ -705,9 +705,29 @@ def build_ladder(reports, slo_ms=None):
                        if any(x["turns_per_call"] for x in by_count[n]) else None),
     } for n in counts]
 
-    first_failure = next((a["requested"] for a in agg if a["failed"]), None)
-    first_slo = next((a["requested"] for a in agg
-                      if slo_ms and a["p95"] and a["p95"] > slo_ms), None)
+    def first_sustained(pred):
+        """First rung where a condition holds and keeps holding.
+
+        Taking the first rung that crosses a line finds noise as readily as a
+        knee: one ladder had 32 calls at 6 turns per call sitting between 30 and
+        34 that both managed 15. A threshold crossed once and recovered is not a
+        breaking point, so the condition has to hold for most of the rungs above
+        it as well.
+        """
+        for i, a in enumerate(agg):
+            if not pred(a):
+                continue
+            above = [b for b in agg[i + 1:] if pred(b) is not None]
+            if not above:
+                return a["requested"]        # nothing above it to disagree
+            holding = sum(1 for b in agg[i + 1:] if pred(b))
+            if holding >= len(agg[i + 1:]) / 2:
+                return a["requested"]
+        return None
+
+    first_failure = first_sustained(lambda a: bool(a["failed"]))
+    first_slo = first_sustained(
+        lambda a: bool(slo_ms and a["p95"] and a["p95"] > slo_ms))
     # One sample touching zero is a spike, not a saturated box. Sustained means
     # at least three samples and one percent of the run.
     first_sat = next((a["requested"] for a in agg
@@ -718,9 +738,18 @@ def build_ladder(reports, slo_ms=None):
     # see - every turn a truncated call did get was answered. Measured against
     # the smallest rung, so no absolute idea of "a full conversation" is needed.
     base_tpc = next((a["turns_per_call"] for a in agg if a["turns_per_call"]), None)
-    first_collapse = next((a["requested"] for a in agg
-                           if base_tpc and a["turns_per_call"]
-                           and a["turns_per_call"] < 0.6 * base_tpc), None)
+    first_collapse = first_sustained(
+        lambda a: bool(base_tpc and a["turns_per_call"]
+                       and a["turns_per_call"] < 0.6 * base_tpc))
+
+    # A ladder run entirely inside saturation cannot locate a knee - once the
+    # box is pegged, which rung looks worse is down to scheduling luck. Say so
+    # rather than letting a non-monotonic table read as a measurement.
+    sat_rungs = sum(1 for a in agg
+                    if (a["saturated"] or 0) >= 0.01 * (a["cpu_samples"] or 1))
+    all_saturated = bool(agg) and sat_rungs == len(agg)
+    tpcs = [a["turns_per_call"] for a in agg if a["turns_per_call"]]
+    non_monotonic = sum(1 for x, y in zip(tpcs, tpcs[1:]) if y > x)
 
     # Pooled across every rung: the densest available view of wait against load.
     xs, ys = [], []
@@ -777,6 +806,8 @@ def build_ladder(reports, slo_ms=None):
         "first_saturation_at": first_sat,
         "first_collapse_at": first_collapse,
         "base_turns_per_call": base_tpc,
+        "all_saturated": all_saturated,
+        "non_monotonic_rungs": non_monotonic,
         "pooled_fit": pooled,
         "turn0_fit": turn0,
         "turn_fits": turn_fits,
@@ -829,6 +860,17 @@ def render_ladder(d):
         w("     A difference between neighbouring rungs that is no bigger than the")
         w("     range within one rung is not a finding. The verdicts below use the")
         w("     median of each rung's passes, not any single run.")
+
+    if d.get("all_saturated"):
+        w("\n  *** EVERY RUNG ON THIS LADDER RAN THE BOX OUT OF CPU ***")
+        w("  The smallest rung here is already past saturation, so this ladder cannot")
+        w("  locate where the system starts to break - it is entirely inside the part")
+        w("  that has already broken. Once the box is pegged, which rung looks worse")
+        w("  comes down to scheduling luck.")
+        if d.get("non_monotonic_rungs"):
+            w(f"  {d['non_monotonic_rungs']} rung(s) got BETTER as calls were added, which is the")
+            w("  signature of that. Re-run lower: bracket the rung where idle first")
+            w("  reaches zero, not above it.")
 
     w("\nWHERE IT BREAKS")
 
