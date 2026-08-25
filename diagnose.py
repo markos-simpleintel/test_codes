@@ -147,11 +147,19 @@ def audio_stats(path):
             if max(abs(s) for s in samples[i:i + frame]) < 200:
                 quiet += 1
 
+    sil_frac = (quiet / frames) if frames else None
     return {
         "duration_s": round(n_samples / rate, 2),
         "rms": rms,
         "peak": peak,
-        "silence_frac": round(quiet / frames, 2) if frames else None,
+        "silence_frac": round(sil_frac, 2) if sil_frac is not None else None,
+        # How much of the recording is actually speech, with the trailing
+        # silence timer taken off. This is the number to compare against the
+        # file we played: total duration always looks fine because the timer
+        # pads it out, and a turn can hold the wrong audio, or half of it, and
+        # still be the right length.
+        "speech_s": (round(n_samples / rate * (1 - sil_frac), 2)
+                     if sil_frac is not None else None),
     }
 
 
@@ -549,6 +557,46 @@ def report(rows, args):
             w("     the PBX prompted, nothing replied, the VAD waited out its timeout and")
             w("     sent what it had. Runs of S at the end are a conversation that stopped;")
             w("     an S in the middle of dots is a single turn the harness slept through.")
+
+    # Did the recording hold the words we actually said? Completing a turn is
+    # not the same as being understood: a turn can run to the end with the
+    # wrong audio in it, and a call can reach the last turn of the script with
+    # everything after the middle transcribed as invention.
+    graded = [r for r in rows
+              if is_voice_turn(r) and r.get("sent_secs")
+              and r.get("audio_speech_s") is not None]
+    if graded:
+        for r in graded:
+            r["_ratio"] = r["audio_speech_s"] / r["sent_secs"]
+        good = [r for r in graded if 0.7 <= r["_ratio"] <= 1.4]
+        w("\nDID THE RECORDING HOLD WHAT WE SAID?")
+        w("  Speech in the recording, with the trailing silence timer removed,")
+        w("  against the length of the file we played. Near 1.0 is right. Well")
+        w("  under means it was cut off; well over means it caught something extra.")
+        w(f"\n  turns graded             {len(graded)}")
+        w(f"  recordings that match    {len(good)} ({len(good) / len(graded):.0%})")
+        w(f"\n    {'turn':<7}{'we sent':<11}{'speech heard':<15}{'ratio':<9}{'wrong':<8}")
+        by_turn = {}
+        for r in graded:
+            by_turn.setdefault(r["turn"], []).append(r)
+        for t in sorted(by_turn)[:18]:
+            v = by_turn[t]
+            sent = statistics.median([x["sent_secs"] for x in v])
+            heard = statistics.median([x["audio_speech_s"] for x in v])
+            bad = sum(1 for x in v if not (0.7 <= x["_ratio"] <= 1.4))
+            w(f"    {t:<7}{f'{sent:.2f}s':<11}{f'{heard:.2f}s':<15}"
+              + f"{heard / sent:.2f}".ljust(9)
+              + f"{bad}/{len(v)}".ljust(8))
+        early = [r for r in graded if (r["turn"] or 0) < 5]
+        late = [r for r in graded if (r["turn"] or 0) >= 5]
+        if early and late:
+            e_bad = sum(1 for r in early if not (0.7 <= r["_ratio"] <= 1.4)) / len(early)
+            l_bad = sum(1 for r in late if not (0.7 <= r["_ratio"] <= 1.4)) / len(late)
+            w(f"\n     first five turns wrong {e_bad:.0%}   later turns wrong {l_bad:.0%}")
+            if l_bad > e_bad * 1.5 and l_bad > 0.1:
+                w("     A call degrades as it goes on. Reaching the last turn of the script")
+                w("     does not mean the later turns were understood - this is the measure")
+                w("     of that, and turn count is not.")
 
     w("\nTURNS THAT WOULD MAKE A RECOGNISER HALLUCINATE")
     bad = [r for r in rows if is_silent(r)]
