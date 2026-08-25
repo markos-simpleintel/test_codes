@@ -655,9 +655,22 @@ def report(rows, args):
         # inside 32ms. If silent turns cluster where the box had nothing left,
         # starvation is the mechanism. If they are spread evenly across busy and
         # idle moments, CPU is not what does it.
-        headroom = [r for r in rows
-                    if is_voice_turn(r) and r.get("idle_at_turn") is not None]
-        if len(headroom) >= 10:
+        voice = [r for r in rows if is_voice_turn(r)]
+        headroom = [r for r in voice if r.get("idle_at_turn") is not None]
+        silent_total = sum(1 for r in voice if is_silent(r))
+        silent_tagged = sum(1 for r in headroom if is_silent(r))
+        # Coverage first. This table once read "CPU is not the cause" while
+        # covering none of the failing turns, because headroom came from the
+        # harness's records and a turn it never saw has no record to tag. A
+        # verdict drawn from the successes only is worse than no verdict.
+        if voice and len(headroom) < len(voice) * 0.9:
+            w(f"\n  *** CPU headroom is known for only {len(headroom)} of {len(voice)} turns,")
+            w(f"  *** and for {silent_tagged} of the {silent_total} silent ones. Those are the turns")
+            w("  *** the question is about, so any verdict below is drawn from the wrong")
+            w("  *** sample. This happens when the run predates t0_epoch; regenerate it:")
+            w("  ***    python rebuild.py results/<run>.events.ndjson")
+            w("  ***    cp results/<run>-rebuilt.json results/<run>.json")
+        if len(headroom) >= 10 and silent_tagged >= 3:
             bands = [(0, 5, "none left (under 5%)"), (5, 20, "tight (5-20%)"),
                      (20, 50, "some (20-50%)"), (50, 101, "plenty (over 50%)")]
             w("\n  by how much of the box was free at that moment:")
