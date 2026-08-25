@@ -620,6 +620,15 @@ def render(r):
         w("     'fixed' is what the group costs with no calls running; 'per call' is")
         w("     what each additional concurrent call adds on top. 'flat' means no")
         w("     per-call cost was measurable, so no call count follows from it.")
+        over = [p for p in r["projection"]
+                if p["peak_pct"] > (cpu["box_capacity_pct"] or 0) * 1.05]
+        if over:
+            w("")
+            for p in over:
+                w(f"     {p['group']} peaked at {p['peak_pct']}%, above the box's whole")
+                w(f"     {cpu['box_capacity_pct']}%. A single group cannot do that: it means many")
+                w("     short-lived processes were summed into one interval. Read it as")
+                w("     process churn, not as that much CPU being used at once.")
         first = next((p for p in r["projection"] if p["projected_calls"]), None)
         if first:
             w(f"\n  First to run out: {first['group']} at roughly "
@@ -980,14 +989,21 @@ def _check_sip_port_free(wait_s=0):
             probe.close()
 
 
+def stem_for(label, tag, n):
+    """File stem for one rung.
+
+    A repeated rung needs its own files, or the second pass overwrites the first
+    and the spread between them - the thing that says whether a step between two
+    rungs is real - is lost.
+    """
+    return f"{label}-{tag}-{n}calls" if tag else f"{label}-{n}calls"
+
+
 def run_one(n, args, outdir):
     from metrics import RunMetrics
     import metrics as metrics_mod
 
-    # A repeated rung needs its own files, or the second pass overwrites the
-    # first and the spread between them - the thing that says whether a step
-    # between two rungs is real - is lost.
-    stem = outdir / f"{args.label}{getattr(args, 'tag', '') or ''}-{n}calls"
+    stem = outdir / stem_for(args.label, getattr(args, "tag", "") or "", n)
     # Stream to disk from the first event so an ugly exit costs at most the
     # last event rather than the entire run's timings.
     metrics_mod.RECORDER = RunMetrics(stream_path=f"{stem}.events.ndjson")
@@ -1204,7 +1220,8 @@ def main():
     plan = []
     for pass_no in range(max(1, args.repeat)):
         for n in levels:
-            plan.append((n, "" if pass_no == 0 else f"-r{pass_no + 1}"))
+            # No leading dash: argparse reads "-r2" as a flag, not as a value.
+            plan.append((n, "" if pass_no == 0 else f"r{pass_no + 1}"))
 
     if len(plan) > 1:
         print(f"*** ladder: {levels}"
@@ -1222,12 +1239,12 @@ def main():
             print(f"\n*** rung {i + 1} of {len(plan)}: {n} calls"
                   + (f" (pass {tag.lstrip('-r')})" if tag else ""))
             os.system(f"{sys.executable} {here} --calls {n} --label {args.label} "
-                      + (f"--tag {tag} " if tag else "") + passthrough)
+                      + (f"--tag={tag} " if tag else "") + passthrough)
             if i < len(plan) - 1:
                 print(f"*** settling {args.settle}s before the next rung")
                 time.sleep(args.settle)
 
-        done = [outdir / f"{args.label}{tag}-{n}calls.json" for n, tag in plan]
+        done = [outdir / (stem_for(args.label, tag, n) + ".json") for n, tag in plan]
         missing = [p for p in done if not p.exists()]
         for p in missing:
             print(f"*** {p.name} is missing - that rung produced no report. Rebuild it "

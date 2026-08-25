@@ -103,7 +103,7 @@ DEFAULT_GROUPS = [
 # that matches the asterisk pattern above - so the measuring instrument was
 # being counted as part of the thing measured, inflating both asterisk's CPU
 # and its process count. Anything matching here belongs to no group.
-IGNORE = re.compile(r"asterisk\s+-rx")
+IGNORE = re.compile(r"asterisk\s+-rx|\brasterisk\b")
 
 # Leading columns of the streamed CSV, ahead of the per-group ones. Named here
 # so the reader can tell a fixed column from a group without counting positions.
