@@ -378,6 +378,18 @@ def build_report(label, requested, rec, cpu, chan, ncpu, wall_s,
     mean_flight = (round(statistics.fmean([p["inflight"] for p in flight]), 1)
                    if flight else 0)
 
+    # Tag each turn with how much of the box was free while it was happening.
+    # vad_bargein has to keep up with real time - 32ms of audio processed inside
+    # 32ms - so if silent recordings cluster in the samples where the box had
+    # nothing left, starvation is the mechanism rather than a guess.
+    idle_at = series_at([{"rel": x["rel"], "idle": x["idle_pct"]}
+                         for x in cpu.samples], "idle")
+    for t in turns:
+        end = t.get("action_end")
+        t["idle_at_turn"] = (round(idle_at(end - rec.t0) / ncpu, 1)
+                             if end is not None and idle_at(end - rec.t0) is not None
+                             else None)
+
     answered = [t for t in turns if t.get("response_ms") is not None]
     resp = [t["response_ms"] for t in answered]
     # The configured silence timer is a constant the PBX waits out on every turn

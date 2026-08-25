@@ -170,6 +170,7 @@ def concurrency_from_run(run):
             "calls_up": t.get("calls_up"),
             "response_ms": t.get("response_ms"),
             "detected_by": t.get("detected_by"),
+            "idle_at_turn": t.get("idle_at_turn"),
             # Which recording we played, so what arrived can be compared with
             # what was sent. A transcript that stops mid-word is either a file
             # that was always short or audio cut off on the way - and those need
@@ -298,6 +299,7 @@ def main():
             "barge": r.get("barge"),
             "response_ms": info.get("response_ms"),
             "detected_by": info.get("detected_by"),
+            "idle_at_turn": info.get("idle_at_turn"),
             "sent_wav": Path(str(info.get("action") or "").replace(chr(92), "/")).name or None,
             "sent_secs": sources.get(
                 Path(str(info.get("action") or "").replace(chr(92), "/")).name),
@@ -512,6 +514,40 @@ def report(rows, args):
                 elif a and s and abs(s - a) / max(a, s) < 0.3:
                     w("\n     Both paths go silent at about the same rate, so the missed AMI")
                     w("     cue is not what causes it. Look at the media path itself.")
+
+        # The question this whole exercise keeps circling: is the silence caused
+        # by the box running out of CPU? vad_bargein has to process 32ms of audio
+        # inside 32ms. If silent turns cluster where the box had nothing left,
+        # starvation is the mechanism. If they are spread evenly across busy and
+        # idle moments, CPU is not what does it.
+        headroom = [r for r in rows
+                    if is_voice_turn(r) and r.get("idle_at_turn") is not None]
+        if len(headroom) >= 10:
+            bands = [(0, 5, "none left (under 5%)"), (5, 20, "tight (5-20%)"),
+                     (20, 50, "some (20-50%)"), (50, 101, "plenty (over 50%)")]
+            w("\n  by how much of the box was free at that moment:")
+            w(f"    {'CPU free':<24}{'turns':<9}{'silent':<14}")
+            seen = []
+            for lo, hi, name in bands:
+                v = [r for r in headroom if lo <= r["idle_at_turn"] < hi]
+                if not v:
+                    continue
+                sil = sum(1 for r in v if is_silent(r))
+                seen.append((name, sil / len(v), len(v)))
+                w(f"    {name:<24}{len(v):<9}"
+                  + f"{sil}/{len(v)} ({sil / len(v):.0%})".ljust(14))
+            if len(seen) >= 2:
+                worst, best = seen[0], seen[-1]
+                if worst[1] > best[1] * 2 and worst[1] > 0.05:
+                    w("\n     Silence concentrates where the box had the least CPU free.")
+                    w("     vad_bargein has to keep up with real time, and starved of CPU it")
+                    w("     stops doing so - that is the link between load and hallucinated")
+                    w("     transcripts, and it means freeing CPU fixes accuracy, not just")
+                    w("     capacity.")
+                elif worst[1] <= best[1] * 1.3:
+                    w("\n     Silence happens at about the same rate whether the box was busy")
+                    w("     or idle. CPU is not what causes it - freeing CPU will raise how")
+                    w("     many calls you carry but will not fix the transcripts.")
 
         by_turn = {}
         for r in rows:
