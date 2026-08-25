@@ -404,6 +404,18 @@ def build_report(label, requested, rec, cpu, chan, ncpu, wall_s,
 
     # Every answered turn is one (load, wait) observation. Pooled, these describe
     # the curve far more densely than one point per rung of a ladder.
+    # The VAD starts listening when its prompt ends and gives up after this
+    # long. Replying slower than this means it records silence whatever we do.
+    vad_timeout_ms = 5000.0
+    replies = [t["reply_delay_ms"] for t in turns
+               if t.get("reply_delay_ms") is not None]
+    late = [t for t in turns
+            if t.get("reply_delay_ms") is not None
+            and t["reply_delay_ms"] > vad_timeout_ms]
+    reply_by_load = fit_line(
+        [t.get("inflight") for t in turns if t.get("reply_delay_ms") is not None],
+        replies)
+
     load_fit = fit_line([t.get("inflight") for t in answered], resp)
     calls_fit = fit_line([t.get("calls_up") for t in answered], resp)
 
@@ -500,6 +512,13 @@ def build_report(label, requested, rec, cpu, chan, ncpu, wall_s,
             "scan_ms_mean": round(statistics.fmean(scans), 1) if scans else None,
             "steal_peak_pct": round(max(steals), 1) if steals else None,
             "steal_mean_pct": round(statistics.fmean(steals), 1) if steals else None,
+        },
+        "our_reply": {
+            "vad_timeout_ms": vad_timeout_ms,
+            "delay": summarize(replies),
+            "too_late": len(late),
+            "too_late_calls": sorted({t["call_id"] for t in late}),
+            "vs_load": reply_by_load,
         },
         "transmitted": summarize_transmission(turns),
         "projection": project_ceiling(cpu.samples, ncpu, conc, capacity),
@@ -605,6 +624,28 @@ def render(r):
             w("     Calls drop out as the run goes on, so later turns ran at lower")
             w("     concurrency. A p50 that falls down this column is load easing off,")
             w("     not the system speeding up.")
+
+    mine = r.get("our_reply") or {}
+    d = mine.get("delay") or {}
+    if d.get("count"):
+        to = mine["vad_timeout_ms"]
+        w(f"\nHOW FAST DID *WE* ANSWER?  (the PBX stops listening after {to / 1000:.0f}s)")
+        w(f"  samples {d['count']}   p50 {ms(d['p50'])}   p90 {ms(d['p90'])}   "
+          f"p95 {ms(d['p95'])}   max {ms(d['max'])}")
+        w(f"  replies slower than {to / 1000:.0f}s   {mine['too_late']} of {d['count']}"
+          + ("   <-- the VAD had already given up on these"
+             if mine["too_late"] else ""))
+        f2 = mine.get("vs_load")
+        if f2:
+            w(f"  delay = {f2['intercept']:.0f}ms + {f2['slope']:.0f}ms per request in flight"
+              f"   (R2 {f2['r2']})")
+        w("     Every other latency here is the PBX answering us. This is us answering")
+        w("     the PBX, and it is what decides whether a recording contains anything:")
+        w("     vad_bargein starts listening the moment its prompt ends and gives up")
+        w(f"     after {to / 1000:.0f}s. Reply slower than that and it records silence, times out,")
+        w("     and sends that silence to be transcribed - however good our audio was.")
+        if mine["too_late"]:
+            w(f"     Affected calls: {', '.join(str(c) for c in mine['too_late_calls'][:15])}")
 
     tx = r.get("transmitted") or {}
     if tx.get("turns"):

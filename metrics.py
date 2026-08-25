@@ -117,6 +117,27 @@ class RunMetrics:
             if open_turn is not None:
                 out.append(self._finish_turn(open_turn))
 
+        # How long WE took to start speaking after the PBX finished.
+        #
+        # Every other latency here measures the PBX answering us. This one is
+        # the other direction, and it is the one that decides whether a
+        # recording contains anything: vad_bargein starts listening the moment
+        # its prompt ends and gives up after NO_SPEECH_TIMEOUT_MS. Take longer
+        # than that to reply and it records silence, times out, and sends the
+        # silence on - no matter that we were about to speak.
+        by_call = {}
+        for t in out:
+            by_call.setdefault(t["call_id"], []).append(t)
+        for turns_of_call in by_call.values():
+            turns_of_call.sort(key=lambda t: t["action_start"] or 0)
+            prev_end = None
+            for t in turns_of_call:
+                start = t.get("action_start")
+                if prev_end is not None and start is not None and start >= prev_end:
+                    t["reply_delay_ms"] = round((start - prev_end) * 1000, 1)
+                else:
+                    t["reply_delay_ms"] = None
+                prev_end = t.get("turn_end") or prev_end
         return out
 
     @staticmethod
