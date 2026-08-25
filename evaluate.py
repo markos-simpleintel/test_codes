@@ -123,19 +123,25 @@ def _install(num_calls, gap_ms):
             if self.media_ready:
                 RECORDER.record("call_media_ready", call_id=self.call_id)
 
-        def _tx_packets(self):
-            """RTP packets this call has put on the wire so far.
+        def _rtp_counters(self):
+            """What this call has sent, and how much of it Asterisk did not get.
 
-            The one measurement that says whether WE sent audio, rather than
-            whether the PBX recorded any. Everything else here reads the
-            receiving end, so "the recording was silent" has always had two
-            possible causes and no way to separate them. pjsua2 has been
-            counting these the whole time; nothing was reading the counter.
+            tx_pkt says whether WE put audio on the wire. tx_loss is the loss
+            Asterisk reports back over RTCP for our stream, which is the only
+            thing here that can see the gap between our socket and the VAD's
+            input. Without it, "we sent it and the recording was still empty"
+            has nowhere left to point.
             """
             try:
-                return int(self.getStreamStat(0).rtcp.txStat.pkt)
+                rtcp = self.getStreamStat(0).rtcp
+                return {
+                    "tx_pkt": int(rtcp.txStat.pkt),
+                    "tx_loss": int(rtcp.txStat.loss),
+                    "rx_pkt": int(rtcp.rxStat.pkt),
+                    "rx_loss": int(rtcp.rxStat.loss),
+                }
             except Exception:                               # noqa: BLE001
-                return None                                 # media not up yet
+                return {}                                   # media not up yet
 
         def start_next_action(self):
             idx = self.action_idx
@@ -143,7 +149,7 @@ def _install(num_calls, gap_ms):
                 a_type, a_val = self.actions[idx]
                 RECORDER.record("action_start", call_id=self.call_id, turn=idx,
                                 action_type=a_type, action=str(a_val)[-40:],
-                                tx_pkt=self._tx_packets())
+                                **self._rtp_counters())
             return super().start_next_action()
 
         def on_action_complete(self, expected_idx=None):
@@ -153,7 +159,7 @@ def _install(num_calls, gap_ms):
             result = super().on_action_complete(expected_idx=expected_idx)
             if self.action_idx != before:
                 RECORDER.record("action_end", call_id=self.call_id, turn=before,
-                                tx_pkt=self._tx_packets())
+                                **self._rtp_counters())
             return result
 
         def finish_wait_and_start_next(self, source, label):
@@ -333,15 +339,27 @@ def summarize_transmission(turns):
         return {}
     by_turn = {}
     for t in rows:
-        by_turn.setdefault(str(t.get("turn")), []).append(t["tx_seconds"])
+        by_turn.setdefault(str(t.get("turn")), []).append(t)
+    losses = [t["tx_loss_pct"] for t in rows if t.get("tx_loss_pct") is not None]
     return {
         "turns": len(rows),
         "silent": sum(1 for t in rows if t["tx_seconds"] < 0.2),
         "median_seconds": round(statistics.median([t["tx_seconds"] for t in rows]), 2),
-        "by_turn": {k: {"count": len(v),
-                        "median_seconds": round(statistics.median(v), 2),
-                        "silent": sum(1 for x in v if x < 0.2)}
-                    for k, v in by_turn.items()},
+        "lossy_turns": sum(1 for x in losses if x > 5.0),
+        "median_loss_pct": round(statistics.median(losses), 1) if losses else None,
+        "max_loss_pct": round(max(losses), 1) if losses else None,
+        "by_turn": {
+            k: {
+                "count": len(v),
+                "median_seconds": round(
+                    statistics.median([x["tx_seconds"] for x in v]), 2),
+                "silent": sum(1 for x in v if x["tx_seconds"] < 0.2),
+                "median_loss_pct": (
+                    round(statistics.median([x["tx_loss_pct"] for x in v
+                                             if x.get("tx_loss_pct") is not None]), 1)
+                    if any(x.get("tx_loss_pct") is not None for x in v) else None),
+            }
+            for k, v in by_turn.items()},
     }
 
 
@@ -579,17 +597,26 @@ def render(r):
         w(f"  sent nothing at all      {tx['silent']}"
           + (f"   <-- the harness never spoke on these" if tx["silent"] else ""))
         w(f"  median audio sent        {tx['median_seconds']}s per turn")
+        if tx.get("median_loss_pct") is not None:
+            w(f"  Asterisk never got       {tx['median_loss_pct']}% of it (median), "
+              f"{tx['max_loss_pct']}% at worst")
+            w(f"  turns losing over 5%     {tx['lossy_turns']} of {tx['turns']}")
         if tx.get("by_turn"):
-            w(f"\n    {'turn':<7}{'turns':<8}{'median sent':<14}{'sent nothing':<14}")
+            w(f"\n    {'turn':<7}{'turns':<8}{'median sent':<14}{'sent nothing':<14}"
+              f"{'lost in transit':<16}")
             for k, v in sorted(tx["by_turn"].items(), key=lambda kv: int(kv[0]))[:16]:
+                loss = ("-" if v.get("median_loss_pct") is None
+                        else f"{v['median_loss_pct']}%")
                 w(f"    {k:<7}{v['count']:<8}"
                   + f"{v['median_seconds']}s".ljust(14)
-                  + f"{v['silent']}/{v['count']}".ljust(14))
-        w("\n     RTP is one packet per 20ms, so this is seconds of audio we actually")
-        w("     transmitted. Compare it with the length of the file we meant to play:")
-        w("     if we sent the whole thing and the PBX still recorded silence, the")
-        w("     audio is being lost between us and the VAD. If we sent nothing, the")
-        w("     fault is in here and no amount of PBX tuning will touch it.")
+                  + f"{v['silent']}/{v['count']}".ljust(14)
+                  + loss.ljust(16))
+        w("\n     RTP is one packet per 20ms, so 'median sent' is seconds of audio we")
+        w("     actually transmitted - compare it against the file we meant to play.")
+        w("     'lost in transit' is what Asterisk itself reports over RTCP that it")
+        w("     never received. Between them these say which of three things went")
+        w("     wrong: we never spoke, we spoke and the network dropped it, or both")
+        w("     were fine and the VAD failed to capture what arrived.")
 
     fit = lat.get("vs_inflight")
     if fit:

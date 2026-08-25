@@ -92,14 +92,17 @@ class RunMetrics:
                         "first_voice": None,
                         "turn_end": None,
                         "detected_by": None,
-                        # RTP packets sent, before and after our audio played.
+                        # RTP counters, before and after our audio played.
                         "tx_pkt_start": e.get("tx_pkt"),
                         "tx_pkt_end": None,
+                        "tx_loss_start": e.get("tx_loss"),
+                        "tx_loss_end": None,
                     }
 
                 elif k == "action_end" and open_turn is not None:
                     open_turn["action_end"] = e["t"]
                     open_turn["tx_pkt_end"] = e.get("tx_pkt")
+                    open_turn["tx_loss_end"] = e.get("tx_loss")
 
                 elif k == "remote_first_voice" and open_turn is not None:
                     if open_turn["first_voice"] is None:
@@ -135,6 +138,19 @@ class RunMetrics:
         else:
             t["tx_packets"] = None
             t["tx_seconds"] = None
+
+        # How many of the packets we sent for this turn Asterisk told us, over
+        # RTCP, that it never received. This is the one number that can see the
+        # gap between our socket and the VAD's input.
+        if t.get("tx_loss_start") is not None and t.get("tx_loss_end") is not None:
+            lost = t["tx_loss_end"] - t["tx_loss_start"]
+            t["tx_lost"] = lost if lost >= 0 else None
+            sent = t.get("tx_packets") or 0
+            t["tx_loss_pct"] = (round(100.0 * lost / (sent + lost), 1)
+                                if (sent + lost) > 0 and lost >= 0 else None)
+        else:
+            t["tx_lost"] = None
+            t["tx_loss_pct"] = None
 
         # Response latency: our audio stopped, how long until theirs started.
         t["response_ms"] = gap("action_end", "first_voice")

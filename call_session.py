@@ -167,12 +167,20 @@ class MyCall(pj.Call):
             self._stop_evt.set()
             self.stop_rtp_keepalive()
             with self._lock:
+                # The last turn's player is still on the retirement list. Left
+                # there it outlives the call and gets destroyed at interpreter
+                # shutdown, after pjsua2 has torn the conference down - and
+                # removing a port from a conference that no longer exists aborts
+                # on an assertion in pjmedia_conf_remove_port.
+                if self.player is not None:
+                    self._retired_players.append(self.player)
                 self.call_audio = None
                 self.player = None
                 self.remote_tap = None
                 self._waiting_for_remote = False
                 self.current_wait_requires_prompt_start = False
                 self.current_wait_merge_bridge_gap = False
+            self._release_retired_players()
             self.release_pjsua2_ownership()
 
     def start_transfer_monitor(self):
