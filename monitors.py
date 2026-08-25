@@ -138,6 +138,10 @@ class CpuSampler(threading.Thread):
         # something else - and the only way to know what is to keep the command
         # lines rather than infer them from the pattern that matched.
         self.cmd_samples = {}
+        # pid -> (group, short name). A command line cannot change, so reading it
+        # once per process instead of once per sample is what keeps the scan
+        # shorter than the interval it is sampled on.
+        self._cmd_cache = {}
         # CPU spent by processes in none of the groups, kept by name so the
         # report can say what else was busy rather than calling it idle.
         self.other_totals = {}
@@ -211,23 +215,36 @@ class CpuSampler(threading.Thread):
         watching the wrong processes, and that is worth finding out.
         """
         out = {}
+        cache = self._cmd_cache
+        live = set()
         for entry in os.listdir("/proc"):
             if not entry.isdigit():
                 continue
             pid = int(entry)
+            live.add(pid)
             try:
-                cmd = _cmdline(pid)
-                if not cmd:
-                    continue
-                group = self._classify(cmd)
-                if group is not None:
-                    seen = self.cmd_samples.setdefault(group, {})
-                    key = _short_name(cmd)
-                    if key not in seen and len(seen) < 12:
-                        seen[key] = cmd[:160]
-                out[pid] = (group, _proc_jiffies(pid), _short_name(cmd))
+                # A pid's command line never changes, so it is read once and
+                # remembered. Reading it every half second for every process on
+                # the box made the scan take 2 seconds at forty calls - longer
+                # than the sampling interval, which is how a group came to report
+                # more CPU than the machine has.
+                known = cache.get(pid)
+                if known is None:
+                    cmd = _cmdline(pid)
+                    if not cmd:
+                        continue
+                    group = self._classify(cmd)
+                    known = cache[pid] = (group, _short_name(cmd))
+                    if group is not None:
+                        seen = self.cmd_samples.setdefault(group, {})
+                        if known[1] not in seen and len(seen) < 12:
+                            seen[known[1]] = cmd[:160]
+                out[pid] = (known[0], _proc_jiffies(pid), known[1])
             except (OSError, ValueError, IndexError):
                 continue          # process exited mid-read; normal at this rate
+        if len(cache) > len(live) * 2 + 256:
+            for dead in [p for p in cache if p not in live]:
+                del cache[dead]           # pids are reused; do not grow forever
         return out
 
     def run(self):
