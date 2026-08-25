@@ -467,6 +467,50 @@ def report(rows, args):
             w("     same file at the same point is a fixed fault, not contention - check")
             w("     that file plays end to end on one call before reading anything else.")
 
+    # Which of the PBX's turns the harness was present for. A turn the harness
+    # never saw gets no reply, so the VAD records silence and times out - and
+    # that is invisible in any measurement of the turns it did see.
+    seen_any = any(r.get("detected_by") for r in rows)
+    if seen_any:
+        by_sess = {}
+        for r in rows:
+            if is_voice_turn(r) and r["inter"] is not None:
+                by_sess.setdefault(r["prefix"], []).append(r)
+        pattern_rows = []
+        for prefix, rs in by_sess.items():
+            rs.sort(key=lambda x: x["inter"])
+            marks, missed, silent_after_miss = [], 0, 0
+            for x in rs:
+                if is_silent(x):
+                    marks.append("S")
+                elif x.get("detected_by"):
+                    marks.append(".")
+                else:
+                    marks.append("?")
+                if not x.get("detected_by") and not is_silent(x):
+                    missed += 1
+            answered = sum(1 for m in marks if m == ".")
+            pattern_rows.append((prefix, "".join(marks), len(rs), answered,
+                                 sum(1 for m in marks if m == "S")))
+        pattern_rows.sort(key=lambda t: -t[4])
+        if any(t[4] for t in pattern_rows):
+            w("\nWHICH OF THE PBX'S TURNS THE HARNESS WAS PRESENT FOR")
+            w("  One character per turn the PBX ran, in order.")
+            w("    .  the harness answered it")
+            w("    S  silence recorded - the harness never replied to this turn")
+            w("    ?  audio present but the harness has no record of the turn\n")
+            w(f"    {'session':<22}{'pattern':<26}{'PBX':<6}{'ours':<7}{'silent':<7}")
+            for prefix, pat, total, answered, silent in pattern_rows[:16]:
+                sess = prefix.split("_")[-1]
+                w(f"    {sess:<22}{pat[:25]:<26}{total:<6}{answered:<7}{silent:<7}")
+            tot_pbx = sum(t[2] for t in pattern_rows)
+            tot_ours = sum(t[3] for t in pattern_rows)
+            w(f"\n     Across every call the PBX ran {tot_pbx} turns and the harness answered")
+            w(f"     {tot_ours}. The {tot_pbx - tot_ours} it did not answer are where the silence comes from:")
+            w("     the PBX prompted, nothing replied, the VAD waited out its timeout and")
+            w("     sent what it had. Runs of S at the end are a conversation that stopped;")
+            w("     an S in the middle of dots is a single turn the harness slept through.")
+
     w("\nTURNS THAT WOULD MAKE A RECOGNISER HALLUCINATE")
     bad = [r for r in rows if is_silent(r)]
     dead = [r for r in bad if r.get("audio_rms") == 0]
