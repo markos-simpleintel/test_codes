@@ -108,6 +108,11 @@ class MyCall(pj.Call):
         self.player = None
         self.keepalive_player = None
         self.remote_tap = None
+        # Players whose audio has finished but which are still connected to the
+        # conference bridge. pjsua2 warns against destroying a player inside its
+        # own EOF callback, so they are disconnected on the next action instead -
+        # a different thread, after the callback has returned.
+        self._retired_players = []
 
         self.action_idx = 0
         self.last_action_type = None
@@ -262,6 +267,33 @@ class MyCall(pj.Call):
         else:
             self.log("transfer detected; leaving call connected because HANGUP_ON_AMI_TRANSFER=0")
 
+    def _release_retired_players(self):
+        """Disconnect finished players from the conference bridge.
+
+        startTransmit() registers a link in the bridge that survives the Python
+        object being dropped. Leaving one behind per turn steadily fills the
+        bridge, and once it is full a new player can be created and started
+        without its audio ever reaching the call - the symptom being turns that
+        play perfectly and arrive as silence.
+        """
+        with self._lock:
+            retired = self._retired_players
+            self._retired_players = []
+            call_audio = self.call_audio
+        for player in retired:
+            if call_audio is not None:
+                try:
+                    player.stopTransmit(call_audio)
+                except pj.Error as e:
+                    self.log(f"retired player disconnect warning: {describe_pj_error(e)}")
+            # FilePlayer holds a reference back to this call. Clearing it lets
+            # refcounting free the player now rather than at some later GC pass,
+            # which is what actually returns the bridge slot.
+            try:
+                player.owner = None
+            except AttributeError:
+                pass
+
     def stop_current_audio(self):
         with self._lock:
             player = self.player
@@ -277,6 +309,7 @@ class MyCall(pj.Call):
                     self.log(f"{label} stopped")
                 except pj.Error as e:
                     self.log(f"{label} stop warning: {e}")
+        self._release_retired_players()
 
     def onCallMediaState(self, prm):
         ci = self.getInfo()
@@ -626,6 +659,8 @@ class MyCall(pj.Call):
             self.last_action_type = action_type
             call_audio = self.call_audio
 
+        # Free the previous turn's bridge slot before claiming another one.
+        self._release_retired_players()
         self.stop_rtp_keepalive()
 
         if action_type == "wav":
@@ -665,6 +700,12 @@ class MyCall(pj.Call):
             if self._transfer_detected:
                 return
             self.action_idx += 1
+            # Was `self.player = None`, which dropped the reference while the
+            # player was still connected to the bridge. Every other cleanup path
+            # in this file calls stopTransmit; this one, the one that runs on
+            # every single turn, did not.
+            if self.player is not None:
+                self._retired_players.append(self.player)
             self.player = None
 
             if self.disconnected:
