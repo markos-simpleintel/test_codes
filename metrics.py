@@ -92,10 +92,14 @@ class RunMetrics:
                         "first_voice": None,
                         "turn_end": None,
                         "detected_by": None,
+                        # RTP packets sent, before and after our audio played.
+                        "tx_pkt_start": e.get("tx_pkt"),
+                        "tx_pkt_end": None,
                     }
 
                 elif k == "action_end" and open_turn is not None:
                     open_turn["action_end"] = e["t"]
+                    open_turn["tx_pkt_end"] = e.get("tx_pkt")
 
                 elif k == "remote_first_voice" and open_turn is not None:
                     if open_turn["first_voice"] is None:
@@ -118,6 +122,19 @@ class RunMetrics:
             if t.get(a) is None or t.get(b) is None:
                 return None
             return round((t[b] - t[a]) * 1000, 1)
+
+        # How much audio we actually put on the wire for this turn. RTP is one
+        # packet per 20ms, so packets/50 is seconds transmitted - directly
+        # comparable to the length of the file we meant to play and to what the
+        # PBX recorded. Without it, "the recording was silent" cannot be told
+        # apart from "we never sent anything".
+        if t.get("tx_pkt_start") is not None and t.get("tx_pkt_end") is not None:
+            sent = t["tx_pkt_end"] - t["tx_pkt_start"]
+            t["tx_packets"] = sent if sent >= 0 else None
+            t["tx_seconds"] = round(sent / 50.0, 2) if sent >= 0 else None
+        else:
+            t["tx_packets"] = None
+            t["tx_seconds"] = None
 
         # Response latency: our audio stopped, how long until theirs started.
         t["response_ms"] = gap("action_end", "first_voice")

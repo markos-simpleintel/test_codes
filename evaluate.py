@@ -123,12 +123,27 @@ def _install(num_calls, gap_ms):
             if self.media_ready:
                 RECORDER.record("call_media_ready", call_id=self.call_id)
 
+        def _tx_packets(self):
+            """RTP packets this call has put on the wire so far.
+
+            The one measurement that says whether WE sent audio, rather than
+            whether the PBX recorded any. Everything else here reads the
+            receiving end, so "the recording was silent" has always had two
+            possible causes and no way to separate them. pjsua2 has been
+            counting these the whole time; nothing was reading the counter.
+            """
+            try:
+                return int(self.getStreamStat(0).rtcp.txStat.pkt)
+            except Exception:                               # noqa: BLE001
+                return None                                 # media not up yet
+
         def start_next_action(self):
             idx = self.action_idx
             if idx < len(self.actions):
                 a_type, a_val = self.actions[idx]
                 RECORDER.record("action_start", call_id=self.call_id, turn=idx,
-                                action_type=a_type, action=str(a_val)[-40:])
+                                action_type=a_type, action=str(a_val)[-40:],
+                                tx_pkt=self._tx_packets())
             return super().start_next_action()
 
         def on_action_complete(self, expected_idx=None):
@@ -137,7 +152,8 @@ def _install(num_calls, gap_ms):
             before = self.action_idx
             result = super().on_action_complete(expected_idx=expected_idx)
             if self.action_idx != before:
-                RECORDER.record("action_end", call_id=self.call_id, turn=before)
+                RECORDER.record("action_end", call_id=self.call_id, turn=before,
+                                tx_pkt=self._tx_packets())
             return result
 
         def finish_wait_and_start_next(self, source, label):
@@ -305,6 +321,30 @@ def project_ceiling(cpu_samples, ncpu, conc=None, capacity=None):
                                       r["projected_calls"] or 0))
 
 
+def summarize_transmission(turns):
+    """What we actually sent, per turn, from the call's own RTP counter.
+
+    Only WAV turns: a DTMF turn sends signalling, not audio, so zero packets
+    there is correct rather than a fault.
+    """
+    rows = [t for t in turns
+            if t.get("tx_seconds") is not None and t.get("action_type") == "wav"]
+    if not rows:
+        return {}
+    by_turn = {}
+    for t in rows:
+        by_turn.setdefault(str(t.get("turn")), []).append(t["tx_seconds"])
+    return {
+        "turns": len(rows),
+        "silent": sum(1 for t in rows if t["tx_seconds"] < 0.2),
+        "median_seconds": round(statistics.median([t["tx_seconds"] for t in rows]), 2),
+        "by_turn": {k: {"count": len(v),
+                        "median_seconds": round(statistics.median(v), 2),
+                        "silent": sum(1 for x in v if x < 0.2)}
+                    for k, v in by_turn.items()},
+    }
+
+
 def build_report(label, requested, rec, cpu, chan, ncpu, wall_s,
                  silence_timer_ms=0.0, slo_ms=None):
     turns = rec.annotate()
@@ -424,6 +464,7 @@ def build_report(label, requested, rec, cpu, chan, ncpu, wall_s,
             "steal_peak_pct": round(max(steals), 1) if steals else None,
             "steal_mean_pct": round(statistics.fmean(steals), 1) if steals else None,
         },
+        "transmitted": summarize_transmission(turns),
         "projection": project_ceiling(cpu.samples, ncpu, conc, capacity),
         "concurrency_timeline": conc,
         "inflight_timeline": flight,
@@ -527,6 +568,25 @@ def render(r):
             w("     Calls drop out as the run goes on, so later turns ran at lower")
             w("     concurrency. A p50 that falls down this column is load easing off,")
             w("     not the system speeding up.")
+
+    tx = r.get("transmitted") or {}
+    if tx.get("turns"):
+        w("\nDID WE PUT AUDIO ON THE WIRE?  (RTP packets we sent, per turn)")
+        w(f"  turns measured           {tx['turns']}")
+        w(f"  sent nothing at all      {tx['silent']}"
+          + (f"   <-- the harness never spoke on these" if tx["silent"] else ""))
+        w(f"  median audio sent        {tx['median_seconds']}s per turn")
+        if tx.get("by_turn"):
+            w(f"\n    {'turn':<7}{'turns':<8}{'median sent':<14}{'sent nothing':<14}")
+            for k, v in sorted(tx["by_turn"].items(), key=lambda kv: int(kv[0]))[:16]:
+                w(f"    {k:<7}{v['count']:<8}"
+                  + f"{v['median_seconds']}s".ljust(14)
+                  + f"{v['silent']}/{v['count']}".ljust(14))
+        w("\n     RTP is one packet per 20ms, so this is seconds of audio we actually")
+        w("     transmitted. Compare it with the length of the file we meant to play:")
+        w("     if we sent the whole thing and the PBX still recorded silence, the")
+        w("     audio is being lost between us and the VAD. If we sent nothing, the")
+        w("     fault is in here and no amount of PBX tuning will touch it.")
 
     fit = lat.get("vs_inflight")
     if fit:
