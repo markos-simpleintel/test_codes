@@ -218,6 +218,39 @@ def concurrency_from_run(run):
     return per_session
 
 
+def idle_by_wallclock(run):
+    """CPU headroom at any wall-clock instant during the run.
+
+    Tagging turns through the harness's own records could only reach turns the
+    harness knew about - which are precisely the turns that were not failing.
+    The PBX logs every turn with a timestamp, so going through wall-clock time
+    reaches the silent ones too, and those are the ones the question is about.
+    """
+    t0 = run.get("t0_epoch")
+    timeline = run.get("cpu_timeline") or []
+    cores = run.get("cores") or 1
+    if not t0 or not timeline:
+        return None
+    points = sorted((t0 + s["rel"], s["idle_pct"] / cores) for s in timeline
+                    if s.get("idle_pct") is not None)
+    if not points:
+        return None
+    times = [p[0] for p in points]
+
+    def at(epoch):
+        import bisect
+        i = bisect.bisect_left(times, epoch)
+        best = None
+        for j in (i - 1, i, i + 1):
+            if 0 <= j < len(points):
+                d = abs(points[j][0] - epoch)
+                # The PBX logs to the second, so a second of slack is the floor.
+                if d <= 1.5 and (best is None or d < best[0]):
+                    best = (d, points[j][1])
+        return round(best[1], 1) if best else None
+    return at
+
+
 def source_durations(input_dir):
     """How long each recording we play actually is."""
     out = {}
@@ -308,6 +341,7 @@ def main():
         sys.exit(f"no usable lines in {args.curl_log}")
 
     sources = source_durations(args.input_audios)
+    idle_at_epoch = idle_by_wallclock(run) if run else None
     per_session = concurrency_from_run(run) if run else {}
     if not per_session:
         print("*** no session ids in the run trace - estimating concurrency from the\n"
@@ -351,7 +385,12 @@ def main():
             "barge": r.get("barge"),
             "response_ms": info.get("response_ms"),
             "detected_by": info.get("detected_by"),
-            "idle_at_turn": info.get("idle_at_turn"),
+            # Prefer the harness's own tag, but fall back to wall clock so
+            # turns it never saw are still classified - they are the point.
+            "idle_at_turn": (info.get("idle_at_turn")
+                             if info.get("idle_at_turn") is not None
+                             else (idle_at_epoch(r["_epoch"])
+                                   if idle_at_epoch and r.get("_epoch") else None)),
             "sent_wav": Path(str(info.get("action") or "").replace(chr(92), "/")).name or None,
             "sent_secs": sources.get(
                 Path(str(info.get("action") or "").replace(chr(92), "/")).name),

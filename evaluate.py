@@ -452,6 +452,11 @@ def build_report(label, requested, rec, cpu, chan, ncpu, wall_s,
     return {
         "label": label,
         "requested_calls": requested,
+        # Absolute start time, so anything measured outside this process - the
+        # PBX's own per-turn log, for one - can be lined up against the CPU
+        # samples. Without it only turns the harness knew about could be tagged
+        # with load, which is exactly the turns that were not failing.
+        "t0_epoch": round(rec.t0, 3),
         "wall_seconds": round(wall_s, 1),
         "cores": ncpu,
         "silence_timer_ms": silence_timer_ms,
