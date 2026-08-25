@@ -632,12 +632,21 @@ def report(rows, args):
                 l_sil = statistics.fmean([x[1] for x in late])
                 e_c = [x[2] for x in early if x[2]]
                 l_c = [x[2] for x in late if x[2]]
-                if e_c and l_c and l_sil > e_sil * 1.5 and statistics.fmean(l_c) < statistics.fmean(e_c):
-                    w(f"\n     Late turns are far more silent ({l_sil:.0%} vs {e_sil:.0%}) while running")
-                    w(f"     at LOWER concurrency ({statistics.fmean(l_c):.0f} calls vs {statistics.fmean(e_c):.0f}). Load cannot")
-                    w("     explain that. Something accumulates over the life of a call - the")
-                    w("     longer it runs, the less audio gets through - so any correlation")
-                    w("     with concurrency above is turn number in disguise.")
+                e_avg = statistics.fmean(e_c) if e_c else None
+                l_avg = statistics.fmean(l_c) if l_c else None
+                # Only a genuinely lower concurrency late in the run rules load
+                # out. Equal averages were being reported as "LOWER (17 vs 17)".
+                if (e_avg and l_avg and l_sil > e_sil * 1.5
+                        and l_avg < e_avg * 0.95):
+                    w(f"\n     Late turns are far more silent ({l_sil:.0%} vs {e_sil:.0%}) while running at")
+                    w(f"     LOWER concurrency ({l_avg:.0f} calls vs {e_avg:.0f}). Load cannot explain that.")
+                    w("     Something accumulates over the life of a call - the longer it runs,")
+                    w("     the less audio gets through - so any correlation with concurrency")
+                    w("     above is turn number in disguise.")
+                elif e_avg and l_avg and l_sil > e_sil * 1.5:
+                    w(f"\n     Late turns are far more silent ({l_sil:.0%} vs {e_sil:.0%}) at much the same")
+                    w(f"     concurrency ({l_avg:.0f} calls vs {e_avg:.0f}). Whatever causes it tracks how")
+                    w("     far into a call you are, not how many calls are running.")
     else:
         w("  (not enough matched turns to say)")
     w("")
