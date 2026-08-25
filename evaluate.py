@@ -667,22 +667,51 @@ def build_ladder(reports, slo_ms=None):
         x["vs_base"] = (round(x["p50"] / base["p50"], 2)
                         if base and x["p50"] else None)
 
-    first_failure = next((x["requested"] for x in rungs if x["failed"]), None)
-    first_slo = next((x["requested"] for x in rungs
-                      if slo_ms and x["p95"] and x["p95"] > slo_ms), None)
+    # Repeated rungs collapse to their median before anything is called a knee.
+    # At a fine step the gap between neighbouring rungs can be smaller than
+    # run-to-run noise, and one unlucky pass should not name a failure point.
+    by_count = {}
+    for x in rungs:
+        by_count.setdefault(x["requested"], []).append(x)
+
+    def med(n, key):
+        vals = [x[key] for x in by_count[n] if x.get(key) is not None]
+        return statistics.median(vals) if vals else None
+
+    counts = sorted(by_count)
+    agg = [{
+        "requested": n,
+        "passes": len(by_count[n]),
+        "p50": med(n, "p50"),
+        "p95": med(n, "p95"),
+        "turns_per_call": med(n, "turns_per_call"),
+        "failed": med(n, "failed"),
+        "saturated": med(n, "saturated"),
+        "cpu_samples": med(n, "cpu_samples"),
+        "p50_spread": ([min(x["p50"] for x in by_count[n] if x["p50"]),
+                        max(x["p50"] for x in by_count[n] if x["p50"])]
+                       if any(x["p50"] for x in by_count[n]) else None),
+        "tpc_spread": ([min(x["turns_per_call"] for x in by_count[n] if x["turns_per_call"]),
+                        max(x["turns_per_call"] for x in by_count[n] if x["turns_per_call"])]
+                       if any(x["turns_per_call"] for x in by_count[n]) else None),
+    } for n in counts]
+
+    first_failure = next((a["requested"] for a in agg if a["failed"]), None)
+    first_slo = next((a["requested"] for a in agg
+                      if slo_ms and a["p95"] and a["p95"] > slo_ms), None)
     # One sample touching zero is a spike, not a saturated box. Sustained means
     # at least three samples and one percent of the run.
-    first_sat = next((x["requested"] for x in rungs
-                      if x["saturated"] >= 3
-                      and x["saturated"] >= 0.01 * (x["cpu_samples"] or 1)), None)
+    first_sat = next((a["requested"] for a in agg
+                      if (a["saturated"] or 0) >= 3
+                      and (a["saturated"] or 0) >= 0.01 * (a["cpu_samples"] or 1)), None)
 
     # Conversations getting shorter is a failure the per-call verdict cannot
     # see - every turn a truncated call did get was answered. Measured against
     # the smallest rung, so no absolute idea of "a full conversation" is needed.
-    base_tpc = next((x["turns_per_call"] for x in rungs if x["turns_per_call"]), None)
-    first_collapse = next((x["requested"] for x in rungs
-                           if base_tpc and x["turns_per_call"]
-                           and x["turns_per_call"] < 0.6 * base_tpc), None)
+    base_tpc = next((a["turns_per_call"] for a in agg if a["turns_per_call"]), None)
+    first_collapse = next((a["requested"] for a in agg
+                           if base_tpc and a["turns_per_call"]
+                           and a["turns_per_call"] < 0.6 * base_tpc), None)
 
     # Pooled across every rung: the densest available view of wait against load.
     xs, ys = [], []
@@ -732,6 +761,7 @@ def build_ladder(reports, slo_ms=None):
 
     return {
         "rungs": rungs,
+        "by_count": agg,
         "slo_ms": slo_ms,
         "first_failure_at": first_failure,
         "first_slo_breach_at": first_slo,
@@ -776,6 +806,20 @@ def render_ladder(d):
     w("               falling is a conversation breaking down, and it will not")
     w("               show up as a failed call - every turn it got was answered.")
     w("     vs base = median wait as a multiple of the smallest rung")
+
+    repeated = [a for a in (d.get("by_count") or []) if a["passes"] > 1]
+    if repeated:
+        w("\nSPREAD ACROSS REPEATS  (is a step between rungs real, or noise?)")
+        w(f"    {'calls':<8}{'passes':<9}{'p50 range':<22}{'turns/call range':<20}")
+        for a in repeated:
+            p = a["p50_spread"]
+            t = a["tpc_spread"]
+            p_text = "{:.0f}-{:.0f}ms".format(p[0], p[1]) if p else "-"
+            t_text = "{:.1f}-{:.1f}".format(t[0], t[1]) if t else "-"
+            w(f"    {a['requested']:<8}{a['passes']:<9}{p_text:<22}{t_text:<20}")
+        w("     A difference between neighbouring rungs that is no bigger than the")
+        w("     range within one rung is not a finding. The verdicts below use the")
+        w("     median of each rung's passes, not any single run.")
 
     w("\nWHERE IT BREAKS")
 
@@ -940,7 +984,10 @@ def run_one(n, args, outdir):
     from metrics import RunMetrics
     import metrics as metrics_mod
 
-    stem = outdir / f"{args.label}-{n}calls"
+    # A repeated rung needs its own files, or the second pass overwrites the
+    # first and the spread between them - the thing that says whether a step
+    # between two rungs is real - is lost.
+    stem = outdir / f"{args.label}{getattr(args, 'tag', '') or ''}-{n}calls"
     # Stream to disk from the first event so an ugly exit costs at most the
     # last event rather than the entire run's timings.
     metrics_mod.RECORDER = RunMetrics(stream_path=f"{stem}.events.ndjson")
@@ -976,7 +1023,7 @@ def run_one(n, args, outdir):
     # runner.py's own entry point wraps main() in the file logger; calling
     # main() directly skips it and loses the per-call detail, which is where
     # the reason a call ended actually shows up.
-    os.environ["RUNNER_LOG_FILE"] = str(outdir / f"{args.label}-{n}calls.runner.log")
+    os.environ["RUNNER_LOG_FILE"] = str(Path(str(stem) + ".runner.log"))
     from run_logging import setup_run_logging
     import runner
 
@@ -1016,7 +1063,7 @@ def run_one(n, args, outdir):
     if not chan.available:
         print("*** asterisk CLI unavailable - channel counts skipped", file=sys.stderr)
 
-    report = build_report(f"{args.label}-{n}", n, rec, cpu, chan,
+    report = build_report(Path(stem).name.replace("calls", ""), n, rec, cpu, chan,
                           os.cpu_count() or 1, wall,
                           silence_timer_ms=args.silence_timer * 1000.0,
                           slo_ms=args.slo)
@@ -1124,6 +1171,12 @@ def main():
                          "ends before writing the report and exiting anyway")
     ap.add_argument("--settle", type=int, default=30,
                     help="seconds between rungs of a ladder")
+    ap.add_argument("--repeat", type=int, default=1,
+                    help="run every rung this many times. At a fine step the "
+                         "difference between neighbouring rungs can be smaller "
+                         "than run-to-run noise; repeats are how you tell (default 1)")
+    ap.add_argument("--tag", default="",
+                    help=argparse.SUPPRESS)     # set by the ladder for repeats
     ap.add_argument("--summarize", nargs="*", default=None, metavar="RUN.json",
                     help="skip running; build the ladder report from these rung "
                          "reports (e.g. --summarize results/ladder-*calls.json)")
@@ -1146,8 +1199,17 @@ def main():
         sys.exit(f"\nERROR: {busy}\n")
 
     levels = [int(x) for x in str(args.calls).split(",") if x.strip()]
-    if len(levels) > 1:
-        print(f"*** ladder: {levels}   settle {args.settle}s between rungs")
+    # Repeats are interleaved rather than run back to back, so a rung is not
+    # measured twice under whatever the box happened to be doing at the time.
+    plan = []
+    for pass_no in range(max(1, args.repeat)):
+        for n in levels:
+            plan.append((n, "" if pass_no == 0 else f"-r{pass_no + 1}"))
+
+    if len(plan) > 1:
+        print(f"*** ladder: {levels}"
+              + (f" x{args.repeat} passes" if args.repeat > 1 else "")
+              + f"   settle {args.settle}s between rungs")
         print("*** each rung runs in its own process so pjsua2 starts clean")
         here = Path(__file__).resolve()
         passthrough = (f"--out {args.out} --cpu-interval {args.cpu_interval} "
@@ -1156,15 +1218,16 @@ def main():
                        f"--teardown-grace {args.teardown_grace} "
                        f"--slo {args.slo} --silence-timer {args.silence_timer}"
                        + (f" --gap {args.gap}" if args.gap else ""))
-        for i, n in enumerate(levels):
-            print(f"\n*** rung {i + 1} of {len(levels)}: {n} calls")
+        for i, (n, tag) in enumerate(plan):
+            print(f"\n*** rung {i + 1} of {len(plan)}: {n} calls"
+                  + (f" (pass {tag.lstrip('-r')})" if tag else ""))
             os.system(f"{sys.executable} {here} --calls {n} --label {args.label} "
-                      + passthrough)
-            if i < len(levels) - 1:
+                      + (f"--tag {tag} " if tag else "") + passthrough)
+            if i < len(plan) - 1:
                 print(f"*** settling {args.settle}s before the next rung")
                 time.sleep(args.settle)
 
-        done = [outdir / f"{args.label}-{n}calls.json" for n in levels]
+        done = [outdir / f"{args.label}{tag}-{n}calls.json" for n, tag in plan]
         missing = [p for p in done if not p.exists()]
         for p in missing:
             print(f"*** {p.name} is missing - that rung produced no report. Rebuild it "
