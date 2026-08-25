@@ -408,6 +408,7 @@ def build_report(label, requested, rec, cpu, chan, ncpu, wall_s,
                               in sorted(cpu_peak.items(), key=lambda kv: -kv[1])},
             "mean_by_group": cpu_mean,
             "processes_started": dict(getattr(cpu, "spawn_counts", {}) or {}),
+            "commands_by_group": dict(getattr(cpu, "cmd_samples", {}) or {}),
             "min_idle_pct": round(min(idles), 1) if idles else None,
             "min_idle_of_box_pct": round(min(idles) / ncpu, 1) if idles else None,
             "saturated_samples": len(saturated),
@@ -565,6 +566,17 @@ def render(r):
         w("     'processes started' counts distinct processes over the whole run. A")
         w("     group that starts a fresh one per turn pays its startup cost over and")
         w("     over, which shows up as a high peak against a low mean.")
+        # Asterisk is threaded, not forked. A group crediting it with hundreds of
+        # processes is counting something else, and only the command lines say what.
+        churny = {g: n for g, n in cpu["processes_started"].items() if n > 20}
+        cmds = cpu.get("commands_by_group") or {}
+        for g in sorted(churny, key=lambda k: -churny[k]):
+            seen = cmds.get(g) or {}
+            if len(seen) <= 1:
+                continue
+            w(f"\n     {g} started {churny[g]} processes. What they were:")
+            for name, full in sorted(seen.items()):
+                w(f"       {name:<26}{full[:60]}")
 
     per_call = out.get("per_call") or []
     tpc = c.get("turns_per_call") or {}

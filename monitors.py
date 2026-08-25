@@ -133,6 +133,11 @@ class CpuSampler(threading.Thread):
         # one that decides whether tuning the code or reusing the process is
         # what would help.
         self.pids_seen = {n: set() for n in self._names}
+        # What the processes in a group actually were. Asterisk is threaded, not
+        # forked, so a group crediting it with hundreds of processes is counting
+        # something else - and the only way to know what is to keep the command
+        # lines rather than infer them from the pattern that matched.
+        self.cmd_samples = {}
         # CPU spent by processes in none of the groups, kept by name so the
         # report can say what else was busy rather than calling it idle.
         self.other_totals = {}
@@ -213,7 +218,13 @@ class CpuSampler(threading.Thread):
                 cmd = _cmdline(pid)
                 if not cmd:
                     continue
-                out[pid] = (self._classify(cmd), _proc_jiffies(pid), _short_name(cmd))
+                group = self._classify(cmd)
+                if group is not None:
+                    seen = self.cmd_samples.setdefault(group, {})
+                    key = _short_name(cmd)
+                    if key not in seen and len(seen) < 12:
+                        seen[key] = cmd[:160]
+                out[pid] = (group, _proc_jiffies(pid), _short_name(cmd))
             except (OSError, ValueError, IndexError):
                 continue          # process exited mid-read; normal at this rate
         return out
