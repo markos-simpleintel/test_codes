@@ -46,6 +46,13 @@ QUIET_RMS = 120              # below the VAD's own MIN_AMPLITUDE neighbourhood
 NO_SPEECH_TIMEOUT_S = 5.0
 
 
+def is_voice_turn(row):
+    """DTMF turns are answered with Read() in the dialplan, not EAGI, so no
+    recording is ever made for them. Absence of audio there is correct, not a
+    fault, and counting it as silence made an entire turn index look 100% dead."""
+    return (row.get("vad") or "").lower() != "dtmf"
+
+
 def is_silent(row):
     """Did this turn carry any speech at all?
 
@@ -53,11 +60,15 @@ def is_silent(row):
     five seconds long, and every sample in them is zero - a big file containing
     nothing. Checking bytes reported none of them.
     """
+    if not is_voice_turn(row):
+        return False
     if row.get("audio_rms") is not None:
         return row["audio_rms"] == 0 or row["audio_rms"] < QUIET_RMS
     if row.get("audio_silence_frac") is not None:
         return row["audio_silence_frac"] > 0.95
-    return (row.get("in_bytes") or 0) < SILENT_BYTES
+    if row.get("in_bytes") is None:
+        return False              # no measurement, not a measurement of nothing
+    return row["in_bytes"] < SILENT_BYTES
 
 
 def parse_curl_log(path, since=None, until=None):
@@ -295,8 +306,8 @@ def report(rows, args):
     if have_conc and have_bytes:
         buckets = {}
         for r in have_conc:
-            if r["in_bytes"] is None:
-                continue
+            if not is_voice_turn(r):
+                continue          # DTMF turns make no recording by design
             buckets.setdefault(bucket(r["concurrency"]), []).append(r)
         w(f"    {'calls':<9}{'turns':<8}{'median bytes':<15}{'median secs':<14}"
           f"{'no speech':<15}{'vad timeouts':<12}")
@@ -314,7 +325,9 @@ def report(rows, args):
             sil_text = "{} ({:.0%})".format(sil, sil / len(rs))
             w(f"    <={b:<7}{len(rs):<8}{med_by:<15}{med_s:<14}"
               f"{sil_text:<15}{timeouts:<12}")
-        w("\n  'silent turns' are turns where the PBX captured almost nothing. A")
+        w("\n  DTMF turns are excluded throughout: the dialplan answers those with")
+        w("  Read() rather than EAGI, so no recording is made and none should be.")
+        w("\n  'no speech' counts turns where the PBX captured almost nothing. A")
         w("  recogniser handed one of those does not return nothing - it returns")
         w("  fluent text that was never said. That is where hallucinations come from,")
         w("  and if this column climbs with concurrency, that is the mechanism.")
@@ -378,7 +391,7 @@ def report(rows, args):
     # large file, so file size stays flat while the content goes empty. What
     # matters is the share of turns carrying no speech.
     pairs = [(r["concurrency"], 1.0 if is_silent(r) else 0.0) for r in rows
-             if r["concurrency"]]
+             if r["concurrency"] and is_voice_turn(r)]
     if len(pairs) >= 3:
         xs = [p[0] for p in pairs]
         mx, my = statistics.fmean(xs), statistics.fmean([p[1] for p in pairs])
@@ -416,7 +429,7 @@ def report(rows, args):
         # fallback turns are the silent ones, that is the mechanism.
         by_detect = {}
         for r in rows:
-            if r.get("detected_by"):
+            if r.get("detected_by") and is_voice_turn(r):
                 by_detect.setdefault(r["detected_by"], []).append(is_silent(r))
         if len(by_detect) > 1:
             w("\n  by how the harness decided the PBX had finished talking:")
@@ -442,15 +455,40 @@ def report(rows, args):
         by_turn = {}
         for r in rows:
             if r["turn"] is not None:
-                by_turn.setdefault(r["turn"], []).append(is_silent(r))
+                by_turn.setdefault(r["turn"], []).append(r)
         if by_turn:
             w("\n  by turn number (does a conversation go deaf partway through?):")
-            w(f"    {'turn':<7}{'turns':<8}{'silent':<10}")
-            for t in sorted(by_turn)[:14]:
-                v = by_turn[t]
-                w(f"    {t:<7}{len(v):<8}{sum(v)}/{len(v)} ({sum(v) / len(v):.0%})")
-            w("     Silence that starts partway in and stays is a call that lost sync,")
-            w("     not a system that is uniformly broken.")
+            w(f"    {'turn':<7}{'turns':<8}{'silent':<14}{'calls up then':<15}")
+            trend = []
+            for t in sorted(by_turn)[:16]:
+                rs = [x for x in by_turn[t] if is_voice_turn(x)]
+                if not rs:
+                    w(f"    {t:<7}{'-':<8}{'(DTMF turn - no recording is made)':<14}")
+                    continue
+                sil = sum(1 for x in rs if is_silent(x))
+                cs = [x["concurrency"] for x in rs if x["concurrency"]]
+                conc = round(statistics.median(cs)) if cs else None
+                trend.append((t, sil / len(rs), conc))
+                w(f"    {t:<7}{len(rs):<8}"
+                  + f"{sil}/{len(rs)} ({sil / len(rs):.0%})".ljust(14)
+                  + f"{conc if conc is not None else '-':<15}")
+            w("     'calls up then' is how many calls were still running at that turn.")
+
+            # Turn index and concurrency move in opposite directions here: calls
+            # start together and drain, so late turns run at LOW concurrency. If
+            # those are the silent ones, load is not what causes this.
+            if len(trend) >= 4:
+                early, late = trend[:len(trend) // 2], trend[len(trend) // 2:]
+                e_sil = statistics.fmean([x[1] for x in early])
+                l_sil = statistics.fmean([x[1] for x in late])
+                e_c = [x[2] for x in early if x[2]]
+                l_c = [x[2] for x in late if x[2]]
+                if e_c and l_c and l_sil > e_sil * 1.5 and statistics.fmean(l_c) < statistics.fmean(e_c):
+                    w(f"\n     Late turns are far more silent ({l_sil:.0%} vs {e_sil:.0%}) while running")
+                    w(f"     at LOWER concurrency ({statistics.fmean(l_c):.0f} calls vs {statistics.fmean(e_c):.0f}). Load cannot")
+                    w("     explain that. Something accumulates over the life of a call - the")
+                    w("     longer it runs, the less audio gets through - so any correlation")
+                    w("     with concurrency above is turn number in disguise.")
     else:
         w("  (not enough matched turns to say)")
     w("")
