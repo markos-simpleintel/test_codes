@@ -170,8 +170,30 @@ def concurrency_from_run(run):
             "calls_up": t.get("calls_up"),
             "response_ms": t.get("response_ms"),
             "detected_by": t.get("detected_by"),
+            # Which recording we played, so what arrived can be compared with
+            # what was sent. A transcript that stops mid-word is either a file
+            # that was always short or audio cut off on the way - and those need
+            # opposite fixes.
+            "action": t.get("action"),
+            "action_type": t.get("action_type"),
         }
     return per_session
+
+
+def source_durations(input_dir):
+    """How long each recording we play actually is."""
+    out = {}
+    base = Path(input_dir)
+    if not base.is_dir():
+        return out
+    for wav in base.glob("*.wav"):
+        try:
+            with wave.open(str(wav), "rb") as w:
+                rate = w.getframerate()
+                out[wav.name] = round(w.getnframes() / rate, 2) if rate else None
+        except (OSError, wave.Error):
+            continue
+    return out
 
 
 def concurrency_from_log(records, window=30.0):
@@ -213,6 +235,9 @@ def main():
                     help="where the PBX writes session directories")
     ap.add_argument("--interaction-offset", type=int, default=1,
                     help="dialplan INTERACTION for the harness's turn 0 (default 1)")
+    ap.add_argument("--input-audios", default="input_audios",
+                    help="where the WAVs we play live, to compare what we sent "
+                         "against what the PBX captured")
     ap.add_argument("--no-audio", action="store_true",
                     help="skip reading the WAVs (much faster; bytes only)")
     ap.add_argument("--out", default=None, help="write a per-turn CSV here")
@@ -229,6 +254,7 @@ def main():
     if not records:
         sys.exit(f"no usable lines in {args.curl_log}")
 
+    sources = source_durations(args.input_audios)
     per_session = concurrency_from_run(run) if run else {}
     if not per_session:
         print("*** no session ids in the run trace - estimating concurrency from the\n"
@@ -272,6 +298,9 @@ def main():
             "barge": r.get("barge"),
             "response_ms": info.get("response_ms"),
             "detected_by": info.get("detected_by"),
+            "sent_wav": Path(str(info.get("action") or "").replace(chr(92), "/")).name or None,
+            "sent_secs": sources.get(
+                Path(str(info.get("action") or "").replace(chr(92), "/")).name),
             **{f"audio_{k}": v for k, v in (stats or {}).items()},
         })
 
@@ -351,6 +380,38 @@ def report(rows, args):
             w(f"    <={b:<7}{len(v):<11}{statistics.median(v):<18}{min(v):<10}")
         w("\n  A conversation that stops early has usually been transferred out, not")
         w("  dropped - which is why every call still reports as completed.")
+
+    sent = [r for r in rows if r.get("sent_secs") and r.get("audio_duration_s")]
+    if sent:
+        w("\nWHAT WE SENT vs WHAT THE PBX CAPTURED")
+        w("  The PBX records our audio plus the silence timer it waits out after,")
+        w("  so a capture should be LONGER than the file we played. Shorter means")
+        w("  the audio was cut off on the way, and the transcript stops mid-word.")
+        by_wav = {}
+        for r in sent:
+            by_wav.setdefault(r["sent_wav"], []).append(r)
+        w(f"\n    {'we played':<20}{'its length':<13}{'captured (median)':<20}"
+          f"{'turns':<8}{'cut short':<11}")
+        for name, rs in sorted(by_wav.items()):
+            src = rs[0]["sent_secs"]
+            caps = [x["audio_duration_s"] for x in rs]
+            short = sum(1 for c in caps if c < src - 0.15)
+            w(f"    {name:<20}{str(src) + 's':<13}"
+              + f"{statistics.median(caps):.2f}s".ljust(20)
+              + f"{len(rs):<8}"
+              + f"{short}/{len(rs)} ({short / len(rs):.0%})".ljust(11))
+        worst = [(n, rs) for n, rs in by_wav.items()
+                 if sum(1 for x in rs if x["audio_duration_s"] < x["sent_secs"] - 0.15)
+                 > len(rs) * 0.5]
+        if worst:
+            w("")
+            for name, rs in worst:
+                src = rs[0]["sent_secs"]
+                med = statistics.median([x["audio_duration_s"] for x in rs])
+                w(f"     {name} is {src}s long but arrives as {med:.2f}s on most turns.")
+            w("     Audio is being lost in transit, not misheard. Every call losing the")
+            w("     same file at the same point is a fixed fault, not contention - check")
+            w("     that file plays end to end on one call before reading anything else.")
 
     w("\nTURNS THAT WOULD MAKE A RECOGNISER HALLUCINATE")
     bad = [r for r in rows if is_silent(r)]
