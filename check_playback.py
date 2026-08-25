@@ -178,11 +178,24 @@ def main():
         print(f"  is below what {len(calls)} concurrent calls need.")
 
     print("\nVERDICT")
-    if failed or stuck > 0:
-        print("  This harness failed to transmit on some turns. Those turns are the")
-        print("  silence the PBX recorded, so the hallucinated transcripts start here")
-        print("  and not in the recogniser. Fix this before reading anything about")
-        print("  capacity from the affected runs.")
+    silent_rate = (failed + max(0, stuck)) / starts if starts else 0
+    if silent_rate >= 0.10:
+        print(f"  This harness failed to transmit on {silent_rate:.0%} of turns. That is")
+        print("  enough to be the silence the PBX recorded, so the hallucinated")
+        print("  transcripts start here rather than in the recogniser. Fix this before")
+        print("  reading anything about capacity from the affected runs.")
+    elif failed or stuck > 0:
+        # A few failures do not explain a lot of silence, and saying "fix this"
+        # on any non-zero count sends you after the wrong thing. Note that a
+        # playback in flight when a call hangs up never reports finishing, so a
+        # small unfinished count is ordinary teardown rather than a fault.
+        print(f"  Only {failed + max(0, stuck)} of {starts} turns ({silent_rate:.1%}) failed to")
+        print("  transmit, and a playback still running when its call hangs up never")
+        print("  reports finishing - so most of that is ordinary teardown.")
+        print("\n  This is NOT enough to explain a large number of silent recordings. If")
+        print("  diagnose.py found many more silent turns than the count above, the")
+        print("  harness did speak and the audio went missing after it left here -")
+        print("  compare the two numbers before chasing this further.")
     else:
         print("  Every playback that started also finished, so the harness spoke on")
         print("  every turn. The silence the PBX recorded came from somewhere between")

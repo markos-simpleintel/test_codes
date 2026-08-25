@@ -408,6 +408,37 @@ def report(rows, args):
                 w("  rate whether the box is busy or idle. That points at the exchange")
                 w("  between the caller side and the VAD, not at capacity.")
 
+        # The decisive split. The harness answers a turn as soon as the PBX
+        # tells it the prompt finished; when that AMI cue is missed it falls
+        # back to listening for RTP silence, which is slower. Meanwhile the
+        # harness transmits an actual silence file between turns - so a slow
+        # answer means the PBX records that silence and times out. If the
+        # fallback turns are the silent ones, that is the mechanism.
+        by_detect = {}
+        for r in rows:
+            if r.get("detected_by"):
+                by_detect.setdefault(r["detected_by"], []).append(is_silent(r))
+        if len(by_detect) > 1:
+            w("\n  by how the harness decided the PBX had finished talking:")
+            w(f"    {'detected by':<16}{'turns':<9}{'silent':<12}")
+            for k in sorted(by_detect):
+                v = by_detect[k]
+                w(f"    {k:<16}{len(v):<9}{sum(v)}/{len(v)} ({sum(v) / len(v):.0%})")
+            amis = by_detect.get("ami", [])
+            sils = by_detect.get("silence", [])
+            if amis and sils:
+                a = sum(amis) / len(amis)
+                s = sum(sils) / len(sils)
+                if s > a * 1.8:
+                    w("\n     Turns that fell back to RTP silence detection are far more")
+                    w("     likely to have recorded nothing. That path answers later, and")
+                    w("     the harness streams a silence file while it waits - so the PBX")
+                    w("     records that silence and hits its no-speech timeout. Fix the")
+                    w("     missed AMI cue and these turns should stop going quiet.")
+                elif a and s and abs(s - a) / max(a, s) < 0.3:
+                    w("\n     Both paths go silent at about the same rate, so the missed AMI")
+                    w("     cue is not what causes it. Look at the media path itself.")
+
         by_turn = {}
         for r in rows:
             if r["turn"] is not None:
