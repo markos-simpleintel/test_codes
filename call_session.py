@@ -274,34 +274,29 @@ class MyCall(pj.Call):
     RELEASE_RETIRED = os.getenv("RELEASE_RETIRED_PLAYERS", "1").strip() != "0"
 
     def _release_retired_players(self):
-        """Disconnect finished players from the conference bridge.
+        """Let finished players be destroyed, off the callback that finished them.
 
-        startTransmit() registers a link in the bridge that survives the Python
-        object being dropped. Leaving one behind per turn steadily fills the
-        bridge, and once it is full a new player can be created and started
-        without its audio ever reaching the call - the symptom being turns that
-        play perfectly and arrive as silence.
+        The original code cleared self.player inside on_action_complete, which
+        runs inside the player's own onEof2. That drops the last reference there
+        and then, whenever the destructor runs, pjsua2 tears the player down from
+        within its own EOF callback - which it warns against.
+
+        Holding the player in a list and clearing that list on the next action
+        moves the destruction onto an ordinary thread instead. Nothing here calls
+        stopTransmit: the destructor already removes the conference port, and
+        removing it twice aborts the process on an assertion in
+        pjmedia_conf_remove_port.
         """
         with self._lock:
             retired = self._retired_players
             self._retired_players = []
-            call_audio = self.call_audio
         if not self.RELEASE_RETIRED:
             return                      # dropped, exactly as before this change
-        for player in retired:
-            # Nothing in here may raise. This runs on the path that starts the
-            # next turn, and an exception escaping it kills the wait thread, so
-            # the call never speaks again and the whole run stalls out. A player
-            # that cannot be disconnected is not worth a turn - catch broadly and
-            # keep going.
-            try:
-                if call_audio is not None:
-                    player.stopTransmit(call_audio)
-            except Exception as e:                          # noqa: BLE001
-                self.log(f"retired player disconnect warning: {e}")
-        # The owner back-reference is deliberately left alone. MyCall.player was
-        # already cleared, so there is no cycle and refcounting frees these on
-        # its own - and clearing it would break onEof2 if it fired once more.
+        # Simply going out of scope here is the point: the reference dies on this
+        # thread rather than inside onEof2. The owner back-reference is left
+        # alone, since MyCall.player was already cleared and clearing it would
+        # break onEof2 if it fired once more.
+        del retired[:]
 
     def stop_current_audio(self):
         with self._lock:
