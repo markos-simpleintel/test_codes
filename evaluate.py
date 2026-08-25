@@ -470,6 +470,10 @@ def build_report(label, requested, rec, cpu, chan, ncpu, wall_s,
             "commands_by_group": dict(getattr(cpu, "cmd_samples", {}) or {}),
             "min_idle_pct": round(min(idles), 1) if idles else None,
             "min_idle_of_box_pct": round(min(idles) / ncpu, 1) if idles else None,
+            # The minimum is one worst sample and reads as if the box were
+            # pegged when it briefly spiked. The median says how it actually ran.
+            "median_idle_of_box_pct": (round(statistics.median(idles) / ncpu, 1)
+                                       if idles else None),
             "saturated_samples": len(saturated),
             "total_samples": len(cpu.samples),
             "box_capacity_pct": round(capacity, 1),
@@ -636,10 +640,14 @@ def render(r):
     if cpu.get("untracked_peak_pct"):
         w(f"    {'(untracked)':<16}{str(cpu['untracked_peak_pct']) + '%':<11}"
           f"{str(cpu['untracked_mean_pct']) + '%':<11}{'-':<18}")
-    w(f"  lowest idle              {cpu.get('min_idle_of_box_pct')}% of the box"
-      f"   ({cpu['min_idle_pct']}% out of {cpu['box_capacity_pct']}%)")
+    w(f"  idle, typical            {cpu.get('median_idle_of_box_pct')}% of the box"
+      f"   (median across the run)")
+    w(f"  idle, worst moment       {cpu.get('min_idle_of_box_pct')}% of the box"
+      f"   (one sample - a spike, not the state)")
+    share = (cpu["saturated_samples"] / cpu["total_samples"]
+             if cpu["total_samples"] else 0)
     w(f"  near-saturated samples   {cpu['saturated_samples']} of {cpu['total_samples']}"
-      f"   (under 5% of the box left free)")
+      f"   ({share:.0%} of the run under 5% free)")
     over = [g for g, v in cpu["peak_by_group"].items()
             if v > (cpu["box_capacity_pct"] or 0)]
     if over or (cpu.get("scan_ms_peak") or 0) > 150:
