@@ -252,7 +252,7 @@ def series_at(timeline, key, tolerance=1.5):
 SINGLE_THREADED = {"pbx_receiver", "test_harness"}
 
 
-def project_ceiling(cpu_samples, ncpu, conc=None):
+def project_ceiling(cpu_samples, ncpu, conc=None, capacity=None):
     """Which process group runs out of room first, and at how many calls.
 
     Concurrency is not constant during a run - calls start together and drain as
@@ -275,9 +275,10 @@ def project_ceiling(cpu_samples, ncpu, conc=None):
                 series[g][0].append(n)
                 series[g][1].append(v)
 
+    box = capacity or 100.0 * ncpu
     out = []
     for g, p in sorted(peak.items(), key=lambda kv: -kv[1]):
-        cap = 100.0 if g in SINGLE_THREADED else 100.0 * ncpu
+        cap = 100.0 if g in SINGLE_THREADED else box
         xs, ys = series.get(g, ([], []))
         fit = fit_line(xs, ys)
         projected, per_call, fixed, r2 = None, None, None, None
@@ -358,8 +359,12 @@ def build_report(label, requested, rec, cpu, chan, ncpu, wall_s,
     # the raw figure read as reassuring when it was nearly the opposite. The
     # saturation mark sits at 5% of the box rather than a quarter of one percent.
     idles = [s["idle_pct"] for s in cpu.samples]
-    capacity = 100.0 * ncpu
+    # A cgroup quota can cap the box below its core count, and a ceiling
+    # projected against the wrong capacity is wrong.
+    capacity = getattr(cpu, "capacity_pct", None) or 100.0 * ncpu
     saturated = [s for s in cpu.samples if s["idle_pct"] <= 0.05 * capacity]
+    steals = [s.get("steal_pct", 0) for s in cpu.samples]
+    untracked = [s.get("untracked_pct", 0) for s in cpu.samples]
 
     return {
         "label": label,
@@ -407,9 +412,18 @@ def build_report(label, requested, rec, cpu, chan, ncpu, wall_s,
             "min_idle_of_box_pct": round(min(idles) / ncpu, 1) if idles else None,
             "saturated_samples": len(saturated),
             "total_samples": len(cpu.samples),
-            "box_capacity_pct": 100 * ncpu,
+            "box_capacity_pct": round(capacity, 1),
+            "cores": ncpu,
+            # CPU the box spent that none of our groups explain, and what it was.
+            "untracked_peak_pct": round(max(untracked), 1) if untracked else None,
+            "untracked_mean_pct": round(statistics.fmean(untracked), 1) if untracked else None,
+            "other_processes": list(getattr(cpu, "other_top", []) or []),
+            # Time the hypervisor took away. On a shared VM this is capacity the
+            # box believes it has and does not.
+            "steal_peak_pct": round(max(steals), 1) if steals else None,
+            "steal_mean_pct": round(statistics.fmean(steals), 1) if steals else None,
         },
-        "projection": project_ceiling(cpu.samples, ncpu, conc),
+        "projection": project_ceiling(cpu.samples, ncpu, conc, capacity),
         "concurrency_timeline": conc,
         "inflight_timeline": flight,
         "channel_timeline": chan.samples,
@@ -528,10 +542,25 @@ def render(r):
         started = cpu["processes_started"].get(g)
         w(f"    {g:<16}{str(v) + '%':<11}{str(cpu['mean_by_group'].get(g, '?')) + '%':<11}"
           f"{(str(started) if started else '-'):<18}")
+    if cpu.get("untracked_peak_pct"):
+        w(f"    {'(untracked)':<16}{str(cpu['untracked_peak_pct']) + '%':<11}"
+          f"{str(cpu['untracked_mean_pct']) + '%':<11}{'-':<18}")
     w(f"  lowest idle              {cpu.get('min_idle_of_box_pct')}% of the box"
       f"   ({cpu['min_idle_pct']}% out of {cpu['box_capacity_pct']}%)")
     w(f"  near-saturated samples   {cpu['saturated_samples']} of {cpu['total_samples']}"
       f"   (under 5% of the box left free)")
+    if cpu.get("steal_peak_pct"):
+        w(f"  hypervisor steal         {cpu['steal_mean_pct']}% mean, "
+          f"{cpu['steal_peak_pct']}% peak")
+        w("     CPU the host gave to another guest. This box has less capacity than")
+        w("     its core count says, and these timings inherit that noise.")
+    if cpu.get("untracked_peak_pct"):
+        w("     '(untracked)' is real CPU the box spent that none of the groups above")
+        w("     explain - other services, or work too short-lived to sample. Idle is")
+        w("     read from the kernel, so it already accounts for this.")
+        for o in (cpu.get("other_processes") or [])[:5]:
+            w(f"       {o['name']:<34}{str(o['mean_pct']) + '% mean':<14}"
+              f"{str(o['peak_pct']) + '% peak'}")
     if any(n > 3 for n in cpu["processes_started"].values()):
         w("     'processes started' counts distinct processes over the whole run. A")
         w("     group that starts a fresh one per turn pays its startup cost over and")

@@ -14,10 +14,25 @@ import threading
 import time
 
 
-def _total_jiffies():
+def _cpu_times():
+    """The whole cpu line from /proc/stat.
+
+    Idle used to be inferred as capacity minus the processes we happen to watch,
+    which counts every untracked process on the box as idle. This box also runs
+    Django, several Node services and Orbitty, so that inference read as
+    headroom that was not there. Real idle comes from the kernel instead.
+    """
     with open("/proc/stat") as f:
         parts = f.readline().split()
-    return sum(int(x) for x in parts[1:8])
+    vals = [int(x) for x in parts[1:9]] + [0] * 8
+    user, nice, system, idle, iowait, irq, softirq, steal = vals[:8]
+    return {
+        "total": user + nice + system + idle + iowait + irq + softirq + steal,
+        "idle": idle + iowait,
+        # Time the hypervisor gave to someone else. On a shared VM this is CPU
+        # the box thinks it has and does not.
+        "steal": steal,
+    }
 
 
 def _proc_jiffies(pid):
@@ -27,6 +42,42 @@ def _proc_jiffies(pid):
         data = f.read()
     fields = data[data.rindex(")") + 2:].split()
     return int(fields[11]) + int(fields[12])          # utime + stime
+
+
+def real_capacity_pct(ncpu):
+    """What this box can actually use, in case a cgroup quota caps it below the
+    core count. A ceiling projected against the wrong capacity is wrong."""
+    for path in ("/sys/fs/cgroup/cpu.max",
+                 "/sys/fs/cgroup/cpu/cpu.cfs_quota_us"):
+        try:
+            with open(path) as f:
+                text = f.read().split()
+        except OSError:
+            continue
+        try:
+            if path.endswith("cpu.max"):
+                if text[0] == "max":
+                    return 100.0 * ncpu
+                return 100.0 * int(text[0]) / int(text[1])
+            quota = int(text[0])
+            if quota <= 0:
+                return 100.0 * ncpu
+            with open("/sys/fs/cgroup/cpu/cpu.cfs_period_us") as f:
+                return 100.0 * quota / int(f.read().strip())
+        except (ValueError, IndexError, OSError, ZeroDivisionError):
+            continue
+    return 100.0 * ncpu
+
+
+def _short_name(cmd):
+    """A readable label for a process we have no group for."""
+    first = cmd.split(" ", 1)[0]
+    name = os.path.basename(first) or first
+    if name in ("python", "python3", "node", "sh", "bash", "perl"):
+        for part in cmd.split(" ")[1:]:
+            if not part.startswith("-"):
+                return f"{name} {os.path.basename(part)}"[:40]
+    return name[:40]
 
 
 def _cmdline(pid):
@@ -54,6 +105,10 @@ DEFAULT_GROUPS = [
 # and its process count. Anything matching here belongs to no group.
 IGNORE = re.compile(r"asterisk\s+-rx")
 
+# Leading columns of the streamed CSV, ahead of the per-group ones. Named here
+# so the reader can tell a fixed column from a group without counting positions.
+FIXED_COLUMNS = ("rel_s", "ncpu", "busy_pct", "idle_pct", "steal_pct", "untracked_pct")
+
 
 class CpuSampler(threading.Thread):
     """Samples per-process CPU into groups. Percentages are per-core, matching
@@ -78,11 +133,16 @@ class CpuSampler(threading.Thread):
         # one that decides whether tuning the code or reusing the process is
         # what would help.
         self.pids_seen = {n: set() for n in self._names}
+        # CPU spent by processes in none of the groups, kept by name so the
+        # report can say what else was busy rather than calling it idle.
+        self.other_totals = {}
+        self.other_peak = {}
+        self.capacity_pct = real_capacity_pct(self.ncpu)
         self._stream = None
         if stream_path:
             try:
                 self._stream = open(stream_path, "w", encoding="utf-8", buffering=1)
-                cols = (["rel_s", "ncpu", "busy_pct", "idle_pct"]
+                cols = (list(FIXED_COLUMNS)
                         + self._names
                         + ["n_" + n for n in self._names]
                         + ["spawned_" + n for n in self._names])
@@ -95,11 +155,21 @@ class CpuSampler(threading.Thread):
         """How many processes each group started over the whole run."""
         return {n: len(v) for n, v in self.pids_seen.items() if v}
 
+    @property
+    def other_top(self):
+        """The busiest processes belonging to none of the groups, by mean CPU."""
+        n = max(1, len(self.samples))
+        return sorted((({"name": k, "mean_pct": round(v / n, 1),
+                         "peak_pct": round(self.other_peak.get(k, 0.0), 1)})
+                       for k, v in self.other_totals.items()),
+                      key=lambda d: -d["mean_pct"])[:8]
+
     def _emit(self, sample):
         if self._stream is None:
             return
         try:
-            row = ([sample["rel"], self.ncpu, sample["busy_pct"], sample["idle_pct"]]
+            row = ([sample["rel"], self.ncpu, sample["busy_pct"], sample["idle_pct"],
+                    sample.get("steal_pct", 0), sample.get("untracked_pct", 0)]
                    + [sample["groups"].get(n, 0) for n in self._names]
                    + [sample["counts"].get(n, 0) for n in self._names]
                    + [sample["spawned"].get(n, 0) for n in self._names])
@@ -128,6 +198,12 @@ class CpuSampler(threading.Thread):
         return None
 
     def _snapshot(self):
+        """Every process, grouped or not.
+
+        Processes outside the groups are kept too, so the CPU nothing accounts
+        for can be named. A busy box whose named groups are quiet means we are
+        watching the wrong processes, and that is worth finding out.
+        """
         out = {}
         for entry in os.listdir("/proc"):
             if not entry.isdigit():
@@ -137,54 +213,69 @@ class CpuSampler(threading.Thread):
                 cmd = _cmdline(pid)
                 if not cmd:
                     continue
-                group = self._classify(cmd)
-                if group is None:
-                    continue
-                out[pid] = (group, _proc_jiffies(pid))
+                out[pid] = (self._classify(cmd), _proc_jiffies(pid), _short_name(cmd))
             except (OSError, ValueError, IndexError):
                 continue          # process exited mid-read; normal at this rate
         return out
 
     def run(self):
         try:
-            prev_total = _total_jiffies()
+            prev_t = _cpu_times()
             prev = self._snapshot()
             while not self._stop.wait(self.interval):
-                total = _total_jiffies()
+                cur_t = _cpu_times()
                 cur = self._snapshot()
-                dt = total - prev_total
+                dt = cur_t["total"] - prev_t["total"]
                 if dt <= 0:
-                    prev_total, prev = total, cur
+                    prev_t, prev = cur_t, cur
                     continue
+                scale = 100.0 * self.ncpu / dt
 
                 by_group = {}
                 counts = {}
-                for pid, (group, _jiff) in cur.items():
-                    self.pids_seen.setdefault(group, set()).add(pid)
-                for pid, (group, jiff) in cur.items():
+                other = {}
+                for pid, (group, _jiff, _n) in cur.items():
+                    if group is not None:
+                        self.pids_seen.setdefault(group, set()).add(pid)
+                for pid, (group, jiff, name) in cur.items():
                     if pid not in prev:
                         continue          # first sighting; no delta yet
-                    pgroup, pjiff = prev[pid]
+                    pgroup, pjiff, _pn = prev[pid]
                     if pgroup != group:
                         continue
-                    pct = 100.0 * (jiff - pjiff) * self.ncpu / dt
-                    if pct < 0:
+                    pct = (jiff - pjiff) * scale
+                    if pct <= 0:
+                        continue
+                    if group is None:
+                        other[name] = other.get(name, 0.0) + pct
                         continue
                     by_group[group] = by_group.get(group, 0.0) + pct
                     counts[group] = counts.get(group, 0) + 1
 
+                for name, pct in other.items():
+                    self.other_totals[name] = self.other_totals.get(name, 0.0) + pct
+                    self.other_peak[name] = max(self.other_peak.get(name, 0.0), pct)
+
+                # Real idle from the kernel, not capacity minus what we watch.
+                idle = (cur_t["idle"] - prev_t["idle"]) * scale
+                steal = (cur_t["steal"] - prev_t["steal"]) * scale
+                system_busy = max(0.0, 100.0 * self.ncpu - idle)
                 busy = sum(by_group.values())
+                # CPU the box spent that none of our groups account for.
+                untracked = max(0.0, system_busy - busy)
                 sample = {
                     "rel": round(time.time() - self.t0, 2),
                     "groups": {k: round(v, 1) for k, v in by_group.items()},
                     "counts": counts,
-                    "busy_pct": round(busy, 1),
-                    "idle_pct": round(max(0.0, 100.0 * self.ncpu - busy), 1),
+                    "busy_pct": round(system_busy, 1),
+                    "idle_pct": round(idle, 1),
+                    "steal_pct": round(steal, 1),
+                    "untracked_pct": round(untracked, 1),
                     "spawned": {g: len(v) for g, v in self.pids_seen.items()},
                 }
                 self.samples.append(sample)
                 self._emit(sample)
-                prev_total, prev = total, cur
+                prev_t, prev = cur_t, cur
         except Exception as e:                      # noqa: BLE001
             self.error = f"{type(e).__name__}: {e}"
 

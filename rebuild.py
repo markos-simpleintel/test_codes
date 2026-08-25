@@ -21,6 +21,7 @@ from pathlib import Path
 
 from metrics import RunMetrics
 import evaluate
+import monitors
 
 
 class _Samples:
@@ -30,6 +31,11 @@ class _Samples:
         self.samples = samples or []
         self.available = available
         self.spawn_counts = spawn_counts or {}
+        # The CSV carries untracked CPU as a total but not the per-process
+        # breakdown behind it, so a rebuilt run reports the figure without the
+        # names. Only a live run can list those.
+        self.other_top = []
+        self.capacity_pct = None
         self.error = None
 
 
@@ -47,13 +53,24 @@ def load_cpu_csv(path):
         return [], 0, {}
 
     header = lines[0].split(",")
-    try:
-        gi = header.index("idle_pct") + 1
-    except ValueError:
+    if "idle_pct" not in header:
         return [], 0, {}
-    tail = header[gi:]
-    idx = {name: gi + i for i, name in enumerate(tail)}
-    pct_names = [n for n in tail if not n.startswith(("n_", "spawned_"))]
+    idx = {name: i for i, name in enumerate(header)}
+    # Anything that is not a known fixed column and not a count column is a
+    # process group. Matching by name rather than by position means a trace
+    # written before steal and untracked existed still reads correctly.
+    fixed = set(monitors.FIXED_COLUMNS)
+    pct_names = [n for n in header
+                 if n not in fixed and not n.startswith(("n_", "spawned_"))]
+
+    def num(parts, name, default=0.0):
+        i = idx.get(name)
+        if i is None or i >= len(parts):
+            return default
+        try:
+            return float(parts[i])
+        except ValueError:
+            return default
 
     rows, ncpu, spawned = [], 0, {}
     for line in lines[1:]:
@@ -61,26 +78,27 @@ def load_cpu_csv(path):
         if len(parts) != len(header):
             continue                     # truncated final line from a kill
         try:
-            ncpu = int(parts[1])
+            ncpu = int(parts[idx["ncpu"]]) if "ncpu" in idx else ncpu
             groups, counts = {}, {}
             for n in pct_names:
-                v = float(parts[idx[n]])
+                v = num(parts, n)
                 if v > 0:
                     groups[n] = v
                 if "n_" + n in idx:
-                    counts[n] = int(float(parts[idx["n_" + n]]))
+                    counts[n] = int(num(parts, "n_" + n))
                 if "spawned_" + n in idx:
                     # Monotonic, so the largest value seen is the run total.
-                    spawned[n] = max(spawned.get(n, 0),
-                                     int(float(parts[idx["spawned_" + n]])))
+                    spawned[n] = max(spawned.get(n, 0), int(num(parts, "spawned_" + n)))
             rows.append({
-                "rel": float(parts[0]),
-                "busy_pct": float(parts[2]),
-                "idle_pct": float(parts[3]),
+                "rel": num(parts, "rel_s"),
+                "busy_pct": num(parts, "busy_pct"),
+                "idle_pct": num(parts, "idle_pct"),
+                "steal_pct": num(parts, "steal_pct"),
+                "untracked_pct": num(parts, "untracked_pct"),
                 "groups": groups,
                 "counts": counts,
             })
-        except (ValueError, IndexError):
+        except (ValueError, IndexError, KeyError):
             continue
     return rows, ncpu, {k: v for k, v in spawned.items() if v}
 
