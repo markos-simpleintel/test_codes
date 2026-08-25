@@ -39,6 +39,26 @@ CURL_LINE = re.compile(
 SILENT_BYTES = 2000          # under ~0.12s of 8kHz 16-bit audio: nothing was said
 QUIET_RMS = 120              # below the VAD's own MIN_AMPLITUDE neighbourhood
 
+# vad_bargein gives up after NO_SPEECH_TIMEOUT_MS with no speech at all and
+# writes out what it buffered - which is that many seconds of digital silence.
+# A recording of exactly this length, containing nothing, is that timeout rather
+# than a quiet caller.
+NO_SPEECH_TIMEOUT_S = 5.0
+
+
+def is_silent(row):
+    """Did this turn carry any speech at all?
+
+    Size alone does not answer it. The recordings that matter here are 80KB and
+    five seconds long, and every sample in them is zero - a big file containing
+    nothing. Checking bytes reported none of them.
+    """
+    if row.get("audio_rms") is not None:
+        return row["audio_rms"] == 0 or row["audio_rms"] < QUIET_RMS
+    if row.get("audio_silence_frac") is not None:
+        return row["audio_silence_frac"] > 0.95
+    return (row.get("in_bytes") or 0) < SILENT_BYTES
+
 
 def parse_curl_log(path, since=None, until=None):
     """Per-turn records the dialplan already writes before each dispatch."""
@@ -204,7 +224,11 @@ def main():
               "*** log's own timestamps instead. For exact figures the AMI user needs\n"
               "*** the 'dialplan' read class so SESSION VarSet events come through.",
               file=sys.stderr)
-        records = concurrency_from_log(records)
+    # Always available as a fallback. The log spans every rung of a ladder, so
+    # turns belonging to other rungs have no entry in this run's trace - and
+    # dropping them from the summary while still listing them below made the two
+    # halves of the report contradict each other.
+    records = concurrency_from_log(records)
 
     # Sessions the run actually placed, so an unrelated call in the log is not
     # mixed into the numbers.
@@ -275,21 +299,21 @@ def report(rows, args):
                 continue
             buckets.setdefault(bucket(r["concurrency"]), []).append(r)
         w(f"    {'calls':<9}{'turns':<8}{'median bytes':<15}{'median secs':<14}"
-          f"{'silent turns':<15}{'all-silence':<12}")
+          f"{'no speech':<15}{'vad timeouts':<12}")
         for b in sorted(x for x in buckets if x is not None):
             rs = buckets[b]
             by = [x["in_bytes"] for x in rs if x["in_bytes"] is not None]
             secs = [x.get("audio_duration_s") for x in rs
                     if x.get("audio_duration_s") is not None]
-            sil = sum(1 for x in rs if (x["in_bytes"] or 0) < SILENT_BYTES)
-            allsil = sum(1 for x in rs
-                         if x.get("audio_silence_frac") is not None
-                         and x["audio_silence_frac"] > 0.95)
+            sil = sum(1 for x in rs if is_silent(x))
+            timeouts = sum(1 for x in rs
+                           if is_silent(x) and x.get("audio_duration_s") is not None
+                           and abs(x["audio_duration_s"] - NO_SPEECH_TIMEOUT_S) < 0.3)
             med_by = statistics.median(by) if by else "-"
             med_s = round(statistics.median(secs), 2) if secs else "-"
             sil_text = "{} ({:.0%})".format(sil, sil / len(rs))
             w(f"    <={b:<7}{len(rs):<8}{med_by:<15}{med_s:<14}"
-              f"{sil_text:<15}{(str(allsil) if secs else 'n/a'):<12}")
+              f"{sil_text:<15}{timeouts:<12}")
         w("\n  'silent turns' are turns where the PBX captured almost nothing. A")
         w("  recogniser handed one of those does not return nothing - it returns")
         w("  fluent text that was never said. That is where hallucinations come from,")
@@ -316,10 +340,18 @@ def report(rows, args):
         w("  dropped - which is why every call still reports as completed.")
 
     w("\nTURNS THAT WOULD MAKE A RECOGNISER HALLUCINATE")
-    bad = [r for r in rows
-           if (r["in_bytes"] is not None and r["in_bytes"] < SILENT_BYTES)
-           or (r.get("audio_silence_frac") is not None and r["audio_silence_frac"] > 0.95)
-           or (r.get("audio_rms") is not None and r["audio_rms"] < QUIET_RMS)]
+    bad = [r for r in rows if is_silent(r)]
+    dead = [r for r in bad if r.get("audio_rms") == 0]
+    timeouts = [r for r in bad if r.get("audio_duration_s") is not None
+                and abs(r["audio_duration_s"] - NO_SPEECH_TIMEOUT_S) < 0.3]
+    if dead:
+        w(f"  {len(dead)} of them contain nothing at all - every sample is zero, not")
+        w("  quiet. That is not a caller who did not speak; it is no audio arriving.")
+    if timeouts:
+        w(f"  {len(timeouts)} are almost exactly {NO_SPEECH_TIMEOUT_S:.0f}s long, which is")
+        w("  vad_bargein's NO_SPEECH_TIMEOUT_MS. The VAD waited the full timeout, heard")
+        w("  nothing, gave up, and the dialplan sent the silence on to Jane regardless.")
+    w("")
     if bad:
         w(f"  {len(bad)} of {len(rows)} turns "
           f"({len(bad) / len(rows):.0%}) sent little or no real audio:\n")
@@ -341,29 +373,53 @@ def report(rows, args):
         w("  None. Every turn carried real audio, so hallucinated transcripts are")
         w("  not being caused by silence reaching the recogniser - look downstream.")
 
-    w("\nDOES CAPTURED AUDIO SHRINK AS LOAD RISES?")
-    pairs = [(r["concurrency"], r["in_bytes"]) for r in rows
-             if r["concurrency"] and r["in_bytes"] is not None]
+    w("\nDOES THIS GET WORSE WITH LOAD?")
+    # Bytes were the wrong signal: a turn that captured nothing still produces a
+    # large file, so file size stays flat while the content goes empty. What
+    # matters is the share of turns carrying no speech.
+    pairs = [(r["concurrency"], 1.0 if is_silent(r) else 0.0) for r in rows
+             if r["concurrency"]]
     if len(pairs) >= 3:
         xs = [p[0] for p in pairs]
-        ys = [p[1] for p in pairs]
-        mx, my = statistics.fmean(xs), statistics.fmean(ys)
+        mx, my = statistics.fmean(xs), statistics.fmean([p[1] for p in pairs])
         sxx = sum((x - mx) ** 2 for x in xs)
-        if sxx > 0:
+        # A slope fitted across a two-call spread extrapolates wildly from
+        # nothing. Needs a real range of concurrency behind it to mean anything.
+        if max(xs) - min(xs) < 5:
+            w(f"  Only {min(xs)}-{max(xs)} concurrent calls in this data - too narrow a")
+            w(f"  range to fit a trend against. {my:.0%} of turns were silent overall.")
+            w("  Point --run at rungs spanning a wider spread, or pass a log covering")
+            w("  more than one rung of a ladder.")
+        elif sxx > 0:
             slope = sum((x - mx) * (y - my) for x, y in pairs) / sxx
-            w(f"  {slope:+.0f} bytes per additional concurrent call"
-              f"   ({len(pairs)} turns, {min(xs)}-{max(xs)} calls)")
-            if slope < -200:
-                w("  Audio capture falls off measurably as load rises. The recogniser is")
-                w("  being handed less to work with, which is enough on its own to")
-                w("  explain both the hallucinations and the shortened conversations.")
-            elif slope > 200:
-                w("  Audio capture rises with load, which usually means callers are being")
-                w("  recorded for longer because the system is slower to respond.")
+            w(f"  {slope * 100:+.1f} percentage points of silent turns per additional"
+              f" concurrent call")
+            w(f"  ({len(pairs)} turns, {min(xs)}-{max(xs)} calls, "
+              f"{my:.0%} silent overall)")
+            if slope > 0.005:
+                w("\n  Silent turns climb with concurrency. Whatever stops audio reaching")
+                w("  the VAD happens more often the busier the box is, so the hallucinations")
+                w("  and the shortened conversations share one cause worth fixing.")
+            elif slope < -0.005:
+                w("\n  Silent turns fall as load rises, which usually means they are not")
+                w("  caused by load at all - look for something that affects every run.")
             else:
-                w("  Flat. Audio capture is not degrading with load, so the shortened")
-                w("  conversations are coming from somewhere else - look at what Jane")
-                w("  did with transcripts that were intact.")
+                w("\n  Flat. The silent turns are not load-driven: they happen at the same")
+                w("  rate whether the box is busy or idle. That points at the exchange")
+                w("  between the caller side and the VAD, not at capacity.")
+
+        by_turn = {}
+        for r in rows:
+            if r["turn"] is not None:
+                by_turn.setdefault(r["turn"], []).append(is_silent(r))
+        if by_turn:
+            w("\n  by turn number (does a conversation go deaf partway through?):")
+            w(f"    {'turn':<7}{'turns':<8}{'silent':<10}")
+            for t in sorted(by_turn)[:14]:
+                v = by_turn[t]
+                w(f"    {t:<7}{len(v):<8}{sum(v)}/{len(v)} ({sum(v) / len(v):.0%})")
+            w("     Silence that starts partway in and stays is a call that lost sync,")
+            w("     not a system that is uniformly broken.")
     else:
         w("  (not enough matched turns to say)")
     w("")
