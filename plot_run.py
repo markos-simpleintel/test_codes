@@ -19,6 +19,7 @@ somewhere that does - nothing here touches the run itself.
 import argparse
 import glob
 import json
+import statistics
 import sys
 from pathlib import Path
 
@@ -204,6 +205,120 @@ def cpu_breakdown(run):
     print()
 
 
+def cpu_peaks(run, threshold=0.85, top=None):
+    """What the box was doing at the moments it nearly ran out of CPU.
+
+    Averages and core-seconds answer "how much of the machine did this take
+    over the run", which is the wrong question for a box that falls over in
+    bursts. A group with a 46% median and a 345% peak is invisible in the mean
+    and is the entire problem at the moment things break.
+
+    So this looks only at the samples where the box was near capacity, and
+    reports what was running then - against what that same thing normally does,
+    because a consumer that is already high and stays high is not what caused
+    the spike.
+    """
+    cpu = run.get("cpu_timeline") or []
+    if len(cpu) < 4:
+        return
+    cores = run.get("cores", 1)
+    capacity = 100.0 * cores
+    span = cpu[-1]["rel"] - cpu[0]["rel"]
+    step = span / max(1, len(cpu) - 1)
+
+    def busy_of(s):
+        return s.get("busy_pct", sum(s["groups"].values()))
+
+    def parts(s):
+        """Every consumer's share of one sample, untracked included."""
+        g = dict(s["groups"])
+        known = sum(g.values())
+        g["(untracked)"] = max(0.0, s.get("untracked_pct",
+                                          busy_of(s) - known))
+        return g
+
+    busy = [busy_of(s) for s in cpu]
+    limit = capacity * threshold
+    hot = [i for i, b in enumerate(busy) if b >= limit]
+    if top:
+        hot = sorted(range(len(busy)), key=lambda i: -busy[i])[:top]
+    if not hot:
+        print(f"\n  No sample reached {threshold:.0%} of capacity "
+              f"({limit:.0f}%). Peak was {max(busy):.0f}%.")
+        return
+
+    # Contiguous runs above the line: a spike that lasts four seconds is a
+    # different problem from forty separate half-second ones.
+    events, run_start, prev = [], None, None
+    for i in sorted(hot):
+        if prev is None or i != prev + 1:
+            if run_start is not None:
+                events.append((run_start, prev))
+            run_start = i
+        prev = i
+    if run_start is not None:
+        events.append((run_start, prev))
+
+    names = sorted({k for s in cpu for k in parts(s)})
+    at_peak = {n: statistics.fmean([parts(cpu[i]).get(n, 0.0) for i in hot])
+               for n in names}
+    typical = {n: median([parts(s).get(n, 0.0) for s in cpu]) for n in names}
+    peak_total = sum(at_peak.values())
+
+    print(f"\n{'=' * 78}")
+    print(f"  CPU AT THE PEAKS — {run.get('label', 'run')}   "
+          f"{run['calls']['connected']} calls   {cores} cores")
+    print("=" * 78)
+    print(f"\n  Samples at or above {threshold:.0%} of the box ({limit:.0f}%): "
+          f"{len(hot)} of {len(cpu)}  ({len(hot) / len(cpu):.0%} of the run)")
+    print(f"  Spike events: {len(events)}   "
+          f"median {statistics.median([(b - a + 1) * step for a, b in events]):.1f}s   "
+          f"longest {max((b - a + 1) * step for a, b in events):.1f}s")
+    print(f"  Highest single sample: {max(busy):.0f}% of {capacity:.0f}%")
+
+    print(f"\n  {'consumer':<16}{'at peak':>10}{'typical':>10}{'rise':>10}"
+          f"{'share of peak':>16}")
+    for n in sorted(names, key=lambda k: -at_peak[k]):
+        if at_peak[n] < 0.5 and typical[n] < 0.5:
+            continue
+        rise = at_peak[n] - typical[n]
+        share = at_peak[n] / peak_total if peak_total else 0
+        print(f"  {n:<16}{at_peak[n]:>9.1f}%{typical[n]:>9.1f}%"
+              f"{rise:>+9.1f}%{share:>15.0%}")
+    print(f"  {'-' * 62}")
+    print(f"  {'TOTAL':<16}{peak_total:>9.1f}%{sum(typical.values()):>9.1f}%"
+          f"{peak_total - sum(typical.values()):>+9.1f}%{'100%':>16}")
+
+    print(f"\n  'rise' is what each consumer adds ON TOP of its normal level when")
+    print(f"  the box is at its busiest. That is the column that names the cause:")
+    print(f"  something already high that stays high did not create the spike.")
+
+    worst = max(names, key=lambda n: at_peak[n] - typical[n])
+    print(f"\n  Largest rise: {worst}  "
+          f"{typical[worst]:.0f}% -> {at_peak[worst]:.0f}%  "
+          f"(+{at_peak[worst] - typical[worst]:.0f}% of a core)")
+
+    forked = (run.get("cpu") or {}).get("forked_mean_by_group") or {}
+    if forked:
+        print(f"\n  Of that, CPU from short-lived children, by who spawned them:")
+        for g, v in sorted(forked.items(), key=lambda kv: -kv[1]):
+            if v > 0.5:
+                print(f"    {g:<16}{v:>8.1f}%  mean across the run")
+
+    other = (run.get("cpu") or {}).get("other_processes") or []
+    if other:
+        print(f"\n  Named processes inside (untracked):")
+        print(f"  {'process':<34}{'mean':>9}{'peak':>9}")
+        for o in other[:8]:
+            print(f"  {o['name']:<34}{o['mean_pct']:>8.1f}%{o['peak_pct']:>8.1f}%")
+        named = sum(o["mean_pct"] for o in other)
+        unnamed = typical.get("(untracked)", 0) - named
+        if unnamed > 1:
+            print(f"\n    Those named account for {named:.1f}% of the untracked band.")
+            print(f"    The rest lives too briefly to be caught alive - see the")
+            print(f"    forked figures above for where it came from.")
+    print()
+
 def median(v):
     s = sorted(v)
     n = len(s)
@@ -370,6 +485,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("json", nargs="+", help="run .json file(s) from evaluate.py")
     ap.add_argument("--out", default=None, help="output directory (default: beside the json)")
+    ap.add_argument("--peak-threshold", type=float, default=0.85,
+                    help="a sample counts as a peak at this fraction of the box "
+                         "(default 0.85, so 340%% of 400%%)")
     ap.add_argument("--no-breakdown", action="store_true",
                     help="skip the printed CPU table, just write the charts")
     args = ap.parse_args()
@@ -392,6 +510,7 @@ def main():
         runs.append(run)
         if not args.no_breakdown:
             cpu_breakdown(run)
+            cpu_peaks(run, threshold=args.peak_threshold)
 
         outdir = Path(args.out) if args.out else Path(p).parent
         outdir.mkdir(parents=True, exist_ok=True)
