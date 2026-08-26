@@ -31,13 +31,19 @@ from matplotlib.ticker import FuncFormatter
 # contrast checks against a light surface. Anything past them folds into "other"
 # rather than inventing a fifth hue.
 COLORS = {
-    "asterisk":     "#2a78d6",
+    "untracked":    "#9aa0a6",
     "vad_bargein":  "#eb6834",
+    "asterisk":     "#2a78d6",
     "pbx_receiver": "#4a3aa7",
     "test_harness": "#008300",
+    "jane_app":     "#0e7c86",
+    "orbitty":      "#a15c00",
     "other":        "#8a8a85",
 }
-STACK_ORDER = ["asterisk", "vad_bargein", "pbx_receiver", "test_harness", "other"]
+# Biggest consumers nearest the axis, so the bands that matter are the ones
+# whose height is easiest to read.
+STACK_ORDER = ["untracked", "vad_bargein", "asterisk", "pbx_receiver",
+               "test_harness", "jane_app", "orbitty"]
 
 INK, INK_2, INK_3 = "#0b0b0b", "#52514e", "#8a8a85"
 SURFACE, GRID = "#fcfcfb", "#e6e5e1"
@@ -69,15 +75,16 @@ def plot_resources(run, out):
     capacity = 100 * cores
     t = [s["rel"] for s in cpu]
 
-    # Collapse anything outside the named groups into "other" so the stack
-    # always sums to the measured busy total.
+    # Every group plus the CPU none of them account for, so the stack sums to
+    # what the kernel says the box was actually doing.
     series = {k: [] for k in STACK_ORDER}
     for s in cpu:
         g = dict(s["groups"])
+        known = sum(g.get(n, 0) for n in STACK_ORDER if n != "untracked")
         for k in STACK_ORDER:
-            if k == "other":
-                known = sum(g.get(n, 0) for n in STACK_ORDER if n != "other")
-                series[k].append(max(0.0, s.get("busy_pct", known) - known))
+            if k == "untracked":
+                series[k].append(max(0.0, s.get("untracked_pct",
+                                               s.get("busy_pct", known) - known)))
             else:
                 series[k].append(g.get(k, 0.0))
 
@@ -120,6 +127,87 @@ def plot_resources(run, out):
     fig.savefig(out, dpi=200, facecolor=SURFACE)
     plt.close(fig)
     return out
+
+
+def cpu_breakdown(run):
+    """Every consumer, in percent and in core-seconds, for one run.
+
+    Percentages say how hard something worked; core-seconds say how much of the
+    machine it actually took. A group that spikes briefly and one that idles at
+    half a core all run look nothing alike in the first and are directly
+    comparable in the second - which is the number that decides what is worth
+    fixing.
+    """
+    cpu = run.get("cpu_timeline") or []
+    if len(cpu) < 2:
+        return
+    cores = run.get("cores", 1)
+    capacity = 100.0 * cores
+    span = cpu[-1]["rel"] - cpu[0]["rel"]
+    step = span / max(1, len(cpu) - 1)
+
+    names = sorted({g for s in cpu for g in s["groups"]})
+    rows = []
+    for g in names:
+        v = [s["groups"].get(g, 0.0) for s in cpu]
+        rows.append((g, v))
+    untracked = []
+    for s in cpu:
+        known = sum(s["groups"].values())
+        untracked.append(max(0.0, s.get("untracked_pct",
+                                        s.get("busy_pct", known) - known)))
+    rows.append(("(untracked)", untracked))
+
+    busy = [s.get("busy_pct", sum(s["groups"].values())) for s in cpu]
+    total_core_s = sum(busy) * step / 100.0
+
+    print(f"\n{'=' * 78}")
+    print(f"  CPU BREAKDOWN — {run.get('label', 'run')}   "
+          f"{run['calls']['connected']} calls   {cores} cores   {span:.0f}s")
+    print("=" * 78)
+    print(f"\n  {'consumer':<16}{'mean':>9}{'median':>9}{'peak':>9}"
+          f"{'core-sec':>11}{'share':>9}")
+    rows.sort(key=lambda r: -sum(r[1]))
+    for g, v in rows:
+        mean = sum(v) / len(v)
+        core_s = sum(v) * step / 100.0
+        share = core_s / total_core_s if total_core_s else 0
+        print(f"  {g:<16}{mean:>8.1f}%{median(v):>8.1f}%{max(v):>8.1f}%"
+              f"{core_s:>10.1f}s{share:>8.0%}")
+    idle = [s.get("idle_pct", capacity - b) for s, b in zip(cpu, busy)]
+    print(f"  {'':<16}{'':>9}{'':>9}{'':>9}{'':>11}")
+    print(f"  {'TOTAL BUSY':<16}{sum(busy) / len(busy):>8.1f}%"
+          f"{median(busy):>8.1f}%{max(busy):>8.1f}%{total_core_s:>10.1f}s{'100%':>9}")
+    print(f"  {'idle':<16}{sum(idle) / len(idle):>8.1f}%{median(idle):>8.1f}%"
+          f"{max(idle):>8.1f}%{sum(idle) * step / 100.0:>10.1f}s")
+    print(f"\n  100% = one core. This box holds {capacity:.0f}%. "
+          f"{len(cpu)} samples, {step:.2f}s apart.")
+
+    started = (run.get("cpu") or {}).get("processes_started") or {}
+    if started:
+        print(f"\n  {'consumer':<16}{'processes':>11}{'core-sec each':>16}")
+        for g, v in rows:
+            n = started.get(g)
+            if not n:
+                continue
+            core_s = sum(v) * step / 100.0
+            print(f"  {g:<16}{n:>11}{core_s / n:>15.3f}s")
+        print("     A group that starts one process per turn pays its startup cost")
+        print("     every time. Core-seconds each is what one of those costs.")
+
+    other = (run.get("cpu") or {}).get("other_processes") or []
+    if other:
+        print(f"\n  inside (untracked) — the busiest processes in no group:")
+        print(f"  {'process':<34}{'mean':>9}{'peak':>9}")
+        for o in other[:8]:
+            print(f"  {o['name']:<34}{o['mean_pct']:>8.1f}%{o['peak_pct']:>8.1f}%")
+    print()
+
+
+def median(v):
+    s = sorted(v)
+    n = len(s)
+    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
 
 
 def plot_latency(run, out):
@@ -282,6 +370,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("json", nargs="+", help="run .json file(s) from evaluate.py")
     ap.add_argument("--out", default=None, help="output directory (default: beside the json)")
+    ap.add_argument("--no-breakdown", action="store_true",
+                    help="skip the printed CPU table, just write the charts")
     args = ap.parse_args()
 
     paths = []
@@ -300,6 +390,8 @@ def main():
             print(f"skip {p}: not an evaluate.py run", file=sys.stderr)
             continue
         runs.append(run)
+        if not args.no_breakdown:
+            cpu_breakdown(run)
 
         outdir = Path(args.out) if args.out else Path(p).parent
         outdir.mkdir(parents=True, exist_ok=True)
