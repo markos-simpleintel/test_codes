@@ -118,6 +118,43 @@ class RunMetrics:
             if open_turn is not None:
                 out.append(self._finish_turn(open_turn))
 
+        # Was the silence file on the wire while a recording was supposed to be?
+        #
+        # This is the question the whole hunt has been circling, asked directly.
+        # The harness switches between the keepalive and a recording on purpose,
+        # so the switch itself is knowable - and if the keepalive is still
+        # transmitting while a turn plays, the PBX records silence no matter
+        # what the player, the packet counters or the durations report.
+        spans = []
+        with self._lock:
+            events = sorted(self.events, key=lambda e: e["t"])
+        opened = {}
+        for e in events:
+            cid = e.get("call_id")
+            if e["kind"] == "silence_on" and cid is not None:
+                opened.setdefault(cid, e["t"])
+            elif e["kind"] == "silence_off" and cid in opened:
+                spans.append((cid, opened.pop(cid), e["t"]))
+        last_seen = max((e["t"] for e in events), default=None)
+        for cid, start in opened.items():           # never switched off
+            if last_seen:
+                spans.append((cid, start, last_seen))
+
+        for t in out:
+            a, b = t.get("action_start"), t.get("action_end")
+            if a is None or b is None or b <= a:
+                t["silence_during_play_ms"] = None
+                continue
+            overlap = 0.0
+            for cid, s, e in spans:
+                if cid != t["call_id"]:
+                    continue
+                lo, hi = max(a, s), min(b, e)
+                if hi > lo:
+                    overlap += hi - lo
+            t["silence_during_play_ms"] = round(overlap * 1000, 1)
+            t["silence_during_play_pct"] = round(100.0 * overlap / (b - a), 1)
+
         # How long WE took to start speaking after the PBX finished.
         #
         # Every other latency here measures the PBX answering us. This one is

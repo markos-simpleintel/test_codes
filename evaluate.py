@@ -123,6 +123,27 @@ def _install(num_calls, gap_ms):
             if self.media_ready:
                 RECORDER.record("call_media_ready", call_id=self.call_id)
 
+        # What are we actually putting on the wire, moment to moment? The
+        # harness has always known - it switches between the silence file and a
+        # recording on purpose - and never wrote it down. Every measurement so
+        # far inferred it from something downstream and inherited that thing's
+        # blind spot. These two record the switch itself.
+        def start_rtp_keepalive(self):
+            was_on = self.keepalive_player is not None
+            result = super().start_rtp_keepalive()
+            if not was_on and self.keepalive_player is not None:
+                RECORDER.record("silence_on", call_id=self.call_id,
+                                turn=self.action_idx)
+            return result
+
+        def stop_rtp_keepalive(self):
+            was_on = self.keepalive_player is not None
+            result = super().stop_rtp_keepalive()
+            if was_on:
+                RECORDER.record("silence_off", call_id=self.call_id,
+                                turn=self.action_idx)
+            return result
+
         def _conf_ports(self):
             """How many ports the conference bridge currently holds.
 
@@ -731,6 +752,32 @@ def render(r):
         else:
             w("     Ports are not accumulating, so players are being freed. Whatever")
             w("     stops the audio arriving is not the bridge filling up.")
+
+    ov = [t for t in (r.get("turns") or [])
+          if t.get("silence_during_play_pct") is not None
+          and t.get("action_type") == "wav"]
+    if ov:
+        bad = [t for t in ov if t["silence_during_play_pct"] > 5]
+        w("\nWAS THE SILENCE FILE ON THE WIRE WHILE A RECORDING PLAYED?")
+        w(f"  wav turns                {len(ov)}")
+        w(f"  overlapped by silence    {len(bad)}"
+          + ("   <-- the PBX heard the keepalive, not the recording"
+             if bad else ""))
+        if bad:
+            by_turn = {}
+            for t in bad:
+                by_turn.setdefault(t["turn"], []).append(t["silence_during_play_pct"])
+            w(f"\n    {'turn':<8}{'turns hit':<12}{'median overlap':<16}")
+            for k in sorted(by_turn)[:18]:
+                v = by_turn[k]
+                w(f"    {k:<8}{len(v):<12}{str(round(statistics.median(v))) + chr(37):<16}")
+            w("\n     Calls affected: "
+              + ", ".join(str(c) for c in sorted({t['call_id'] for t in bad})[:15]))
+        w("\n     The harness switches between the keepalive and a recording on")
+        w("     purpose, so this is not inferred from packet counts or durations -")
+        w("     it is the switch itself. A turn overlapped here played its file")
+        w("     while the silence file was still transmitting, which is why every")
+        w("     other measure reported it as healthy.")
 
     pb = r.get("playback") or {}
     if pb.get("turns"):
