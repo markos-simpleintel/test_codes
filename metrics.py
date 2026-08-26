@@ -231,6 +231,30 @@ class RunMetrics:
                 t[k] = round(t[k], 3)
         return t
 
+    def silence_spans(self):
+        """(call_id, start, end) for every stretch the keepalive was on the wire.
+
+        Exported raw so it can be laid against the PBX's own recording windows.
+        Comparing it only against turns the harness took is blind to the turns it
+        never took - which are exactly the ones the PBX records as silence.
+        """
+        with self._lock:
+            events = sorted(self.events, key=lambda e: e["t"])
+        last = max((e["t"] for e in events), default=None)
+        spans, opened = [], {}
+        for e in events:
+            cid = e.get("call_id")
+            if cid is None:
+                continue
+            if e["kind"] == "silence_on":
+                opened.setdefault(cid, e["t"])
+            elif e["kind"] == "silence_off" and cid in opened:
+                spans.append((cid, round(opened.pop(cid), 3), round(e["t"], 3)))
+        for cid, start in opened.items():
+            if last:
+                spans.append((cid, round(start, 3), round(last, 3)))
+        return spans
+
     def calls(self):
         """One record per call: when it connected, ended, and why."""
         by_call = {}
