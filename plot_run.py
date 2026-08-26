@@ -319,6 +319,57 @@ def cpu_peaks(run, threshold=0.85, top=None):
             print(f"    forked figures above for where it came from.")
     print()
 
+def write_cpu_csv(run, path, threshold=0.85):
+    """The breakdown as data, so it can go in a sheet rather than a terminal.
+
+    One row per consumer with both views side by side: what it costs on
+    average, and what it costs at the moments the box is nearly out. Those
+    answer different questions and a fix that helps one may do nothing for the
+    other, so neither is useful without the other beside it.
+    """
+    cpu = run.get("cpu_timeline") or []
+    if len(cpu) < 4:
+        return None
+    cores = run.get("cores", 1)
+    capacity = 100.0 * cores
+    span = cpu[-1]["rel"] - cpu[0]["rel"]
+    step = span / max(1, len(cpu) - 1)
+
+    def busy_of(s):
+        return s.get("busy_pct", sum(s["groups"].values()))
+
+    def parts(s):
+        g = dict(s["groups"])
+        g["(untracked)"] = max(0.0, s.get("untracked_pct", busy_of(s) - sum(g.values())))
+        return g
+
+    busy = [busy_of(s) for s in cpu]
+    hot = [i for i, b in enumerate(busy) if b >= capacity * threshold]
+    names = sorted({k for s in cpu for k in parts(s)})
+    forked = (run.get("cpu") or {}).get("forked_mean_by_group") or {}
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("consumer,mean_pct,median_pct,peak_pct,core_seconds,share_of_total,"
+                "at_peak_pct,typical_pct,rise_pct,share_of_peak,"
+                "forked_children_pct,processes_started\n")
+        total_core_s = sum(busy) * step / 100.0
+        peak_total = sum(statistics.fmean([parts(cpu[i]).get(n, 0.0) for i in hot])
+                         for n in names) if hot else 0
+        started = (run.get("cpu") or {}).get("processes_started") or {}
+        for n in names:
+            v = [parts(s).get(n, 0.0) for s in cpu]
+            core_s = sum(v) * step / 100.0
+            at_peak = statistics.fmean([parts(cpu[i]).get(n, 0.0)
+                                        for i in hot]) if hot else 0
+            typical = median(v)
+            f.write(f"{n},{sum(v) / len(v):.1f},{typical:.1f},{max(v):.1f},"
+                    f"{core_s:.1f},{core_s / total_core_s if total_core_s else 0:.3f},"
+                    f"{at_peak:.1f},{typical:.1f},{at_peak - typical:+.1f},"
+                    f"{at_peak / peak_total if peak_total else 0:.3f},"
+                    f"{forked.get(n, '')},{started.get(n, '')}\n")
+    return path
+
+
 def median(v):
     s = sorted(v)
     n = len(s)
@@ -511,6 +562,11 @@ def main():
         if not args.no_breakdown:
             cpu_breakdown(run)
             cpu_peaks(run, threshold=args.peak_threshold)
+            csv_path = Path(p).with_suffix("").with_suffix("")
+            got = write_cpu_csv(run, str(csv_path) + ".cpu-breakdown.csv",
+                                args.peak_threshold)
+            if got:
+                written.append(got)
 
         outdir = Path(args.out) if args.out else Path(p).parent
         outdir.mkdir(parents=True, exist_ok=True)
