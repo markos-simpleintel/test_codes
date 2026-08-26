@@ -571,6 +571,12 @@ def build_report(label, requested, rec, cpu, chan, ncpu, wall_s,
                               in sorted(cpu_peak.items(), key=lambda kv: -kv[1])},
             "mean_by_group": cpu_mean,
             "processes_started": dict(getattr(cpu, "spawn_counts", {}) or {}),
+            # CPU used by short-lived children, charged to whoever spawned them.
+            "forked_mean_by_group": {
+                g: round(statistics.fmean(
+                    [s.get("forked", {}).get(g, 0.0) for s in cpu.samples]), 1)
+                for g in sorted({k for s in cpu.samples
+                                 for k in (s.get("forked") or {})})},
             "commands_by_group": dict(getattr(cpu, "cmd_samples", {}) or {}),
             "min_idle_pct": round(min(idles), 1) if idles else None,
             "min_idle_of_box_pct": round(min(idles) / ncpu, 1) if idles else None,
@@ -603,6 +609,7 @@ def build_report(label, requested, rec, cpu, chan, ncpu, wall_s,
         "playback": summarize_playback(turns),
         "transmitted": summarize_transmission(turns),
         "projection": project_ceiling(cpu.samples, ncpu, conc, capacity),
+        "silence_spans": rec.silence_spans(),
         "concurrency_timeline": conc,
         "inflight_timeline": flight,
         "channel_timeline": chan.samples,
@@ -877,6 +884,17 @@ def render(r):
         for o in (cpu.get("other_processes") or [])[:5]:
             w(f"       {o['name']:<34}{str(o['mean_pct']) + '% mean':<14}"
               f"{str(o['peak_pct']) + '% peak'}")
+    forked = {g: v for g, v in (cpu.get("forked_mean_by_group") or {}).items() if v > 0.5}
+    if forked:
+        w("\n  CPU SPENT BY SHORT-LIVED CHILDREN  (charged to whatever spawned them)")
+        for g, v in sorted(forked.items(), key=lambda kv: -kv[1]):
+            w(f"    {g:<16}{str(v) + '%':<11}mean")
+        w("     A process that lives milliseconds is missed by a sampler looking")
+        w("     every half second, which is why this never appeared in any group and")
+        w("     only showed up as untracked. The kernel adds a reaped child's time")
+        w("     onto its parent, so this catches all of it - ffmpeg, the dialplan's")
+        w("     shells, and whatever else is being forked per turn and per hangup.")
+
     if any(n > 3 for n in cpu["processes_started"].values()):
         w("     'processes started' counts distinct processes over the whole run. A")
         w("     group that starts a fresh one per turn pays its startup cost over and")

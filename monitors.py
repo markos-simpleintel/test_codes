@@ -36,12 +36,25 @@ def _cpu_times():
 
 
 def _proc_jiffies(pid):
-    # /proc/pid/stat: comm (field 2) can contain spaces and parens, so index
-    # from the last ')' rather than splitting the whole line.
+    """This process's own CPU, and the CPU of children it has reaped.
+
+    A process that lives milliseconds is usually missed by a sampler looking
+    every half second, so the fork churn around each call - ffmpeg per turn,
+    shells per turn, thirty more ffmpeg at hangup - never landed in any group
+    and turned up only as an untracked total with nothing attached to it.
+
+    The kernel adds a reaped child's time onto its parent, so cutime/cstime
+    catches every one of them however briefly it lived, and attributes it to
+    whatever spawned it.
+    """
+    # comm (field 2) can contain spaces and parens, so index from the last ')'
+    # rather than splitting the whole line.
     with open(f"/proc/{pid}/stat") as f:
         data = f.read()
     fields = data[data.rindex(")") + 2:].split()
-    return int(fields[11]) + int(fields[12])          # utime + stime
+    own = int(fields[11]) + int(fields[12])           # utime + stime
+    children = int(fields[13]) + int(fields[14])      # cutime + cstime
+    return own, children
 
 
 def real_capacity_pct(ncpu):
@@ -239,7 +252,8 @@ class CpuSampler(threading.Thread):
                         seen = self.cmd_samples.setdefault(group, {})
                         if known[1] not in seen and len(seen) < 12:
                             seen[known[1]] = cmd[:160]
-                out[pid] = (known[0], _proc_jiffies(pid), known[1])
+                own, children = _proc_jiffies(pid)
+                out[pid] = (known[0], own, known[1], children)
             except (OSError, ValueError, IndexError):
                 continue          # process exited mid-read; normal at this rate
         if len(cache) > len(live) * 2 + 256:
@@ -272,15 +286,21 @@ class CpuSampler(threading.Thread):
                 by_group = {}
                 counts = {}
                 other = {}
-                for pid, (group, _jiff, _n) in cur.items():
+                for pid, (group, _jiff, _n, _c) in cur.items():
                     if group is not None:
                         self.pids_seen.setdefault(group, set()).add(pid)
-                for pid, (group, jiff, name) in cur.items():
+                forked = {}
+                for pid, (group, jiff, name, kids) in cur.items():
                     if pid not in prev:
                         continue          # first sighting; no delta yet
-                    pgroup, pjiff, _pn = prev[pid]
+                    pgroup, pjiff, _pn, pkids = prev[pid]
                     if pgroup != group:
                         continue
+                    # Children this process reaped since the last sample - the
+                    # short-lived spawns no scan could ever catch alive.
+                    kid_pct = (kids - pkids) * scale
+                    if kid_pct > 0:
+                        forked[group or name] = forked.get(group or name, 0.0) + kid_pct
                     pct = (jiff - pjiff) * scale
                     if pct <= 0:
                         continue
@@ -314,6 +334,7 @@ class CpuSampler(threading.Thread):
                     # trust, and that should be visible rather than inferred.
                     "scan_ms": scan_ms,
                     "spawned": {g: len(v) for g, v in self.pids_seen.items()},
+                    "forked": {k: round(v, 1) for k, v in forked.items()},
                 }
                 self.samples.append(sample)
                 self._emit(sample)
