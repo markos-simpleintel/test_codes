@@ -190,6 +190,17 @@ AMI_TRANSFER_CONTEXT_PREFIXES = os.getenv("AMI_TRANSFER_CONTEXT_PREFIXES", "tran
 AMI_TRANSFER_DIAL_TARGETS = os.getenv("AMI_TRANSFER_DIAL_TARGETS", "@CUCM_Trunk")
 HANGUP_ON_AMI_TRANSFER = env_bool("HANGUP_ON_AMI_TRANSFER", True)
 
+# Dial targets that are NOT a transfer, however much they look like one.
+#
+# Reaching Jane means the dialplan routes our own call out over the same trunk
+# the live-agent transfer uses: Dial(PJSIP/919073750302@CUCM_Trunk) in
+# from-internal-custom, on our own channel, before the call is even answered.
+# Matching "@CUCM_Trunk" alone therefore fired on every call at setup and hung it
+# up - which is why the detector tends to get switched off, taking the real
+# protection with it. A genuine transfer dials a short extension (368, 546, 563),
+# never the number we asked for, so excluding our own destination separates them.
+AMI_TRANSFER_IGNORE_TARGETS = env_csv("AMI_TRANSFER_IGNORE_TARGETS", DEST_NUMBER)
+
 AMI_TRANSFER_CONTEXT_PREFIX_LIST = env_csv(
     "AMI_TRANSFER_CONTEXT_PREFIXES",
     AMI_TRANSFER_CONTEXT_PREFIXES,

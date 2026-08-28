@@ -6,6 +6,7 @@ from config import (
     AMI_DETECT_TRANSFER,
     AMI_TRANSFER_CONTEXT_PREFIX_LIST,
     AMI_TRANSFER_DIAL_TARGET_LIST,
+    AMI_TRANSFER_IGNORE_TARGETS,
     AMI_USE_AGI_STREAM_EVENTS,
 )
 
@@ -388,6 +389,14 @@ class AmiReadyEvents:
 
         return False
 
+    def _is_our_own_outbound_leg(self, text):
+        """True when this Dial is the call we placed, not a transfer of it.
+
+        Both go out the same trunk. What tells them apart is the number: ours is
+        the destination we asked for, a transfer is a short internal extension.
+        """
+        return any(target and target in text for target in AMI_TRANSFER_IGNORE_TARGETS)
+
     def _matches_transfer_event(self, msg):
         if not AMI_DETECT_TRANSFER:
             return False
@@ -404,6 +413,8 @@ class AmiReadyEvents:
                 return self._matches_caller_filter(msg)
 
             if application.lower() == "dial":
+                if self._is_our_own_outbound_leg(app_data):
+                    return False
                 if any(target in app_data for target in AMI_TRANSFER_DIAL_TARGET_LIST):
                     return self._matches_caller_filter(msg)
 
@@ -412,6 +423,8 @@ class AmiReadyEvents:
                 msg.get(field, "")
                 for field in ("DialString", "DestChannel", "Destination", "Channel")
             )
+            if self._is_our_own_outbound_leg(dial_string):
+                return False
             if any(target in dial_string for target in AMI_TRANSFER_DIAL_TARGET_LIST):
                 return self._matches_caller_filter(msg)
 
