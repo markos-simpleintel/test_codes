@@ -23,11 +23,14 @@ CALLER_DISPLAY = os.getenv("CALLER_DISPLAY", "Rahul")
 # to be CALLER_USER, which is also the digest auth username - meaning testing a
 # different caller needed a different PBX account.
 #
-# CALLER_ID_NUMBER is the From-header user; auth stays on CALLER_USER, so one
-# SIP account can present different numbers. SEND_PAI additionally sends
-# P-Asserted-Identity, which Asterisk prefers when the endpoint has
-# trust_id_inbound=yes. Whichever the PBX takes, the dialplan logs what it
-# decided: NoOp CALLER=... raw_cid=...
+# CALLER_ID_NUMBER is the number the call asserts, sent in P-Asserted-Identity.
+# It does NOT go in the From header: Asterisk identifies the inbound endpoint by
+# the From user, so a caller ID there matches no endpoint and the call lands on
+# PJSIP/anonymous, never reaching the AI context. Whether the PAI is honoured is
+# the endpoint's trust_id_inbound setting:
+#     asterisk -rx "pjsip show endpoint <CALLER_USER>" | grep trust_id
+# SEND_PAI forces the header even when the number equals the account. Either way
+# the dialplan logs what it settled on: NoOp CALLER=... raw_cid=...
 CALLER_ID_NUMBER = os.getenv("CALLER_ID_NUMBER", "") or CALLER_USER
 SEND_PAI = os.getenv("SEND_PAI", "").strip().lower() in ("1", "true", "yes", "on")
 

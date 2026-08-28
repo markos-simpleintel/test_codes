@@ -8,7 +8,9 @@ import pjsua2 as pj
 
 from config import (
     ASTERISK_HOST,
+    CALLER_DISPLAY,
     CALLER_ID_NUMBER,
+    CALLER_USER,
     HANGUP_ON_AMI_TRANSFER,
     INITIAL_WAIT_TIMEOUT_SECS,
     NEXT_TURN_WAIT_TIMEOUT_SECS,
@@ -230,10 +232,11 @@ class MyCall(pj.Call):
             sequence,
             timeout_secs=10,
             stop_evt=self._stop_evt,
-            # Matched against the AMI event's CallerIDNum/Channel, which carry the
-            # From-header number, not the auth username. Same value while
-            # CALLER_ID_NUMBER is unset; only diverges once a call overrides it.
-            expected_caller=CALLER_ID_NUMBER,
+            # The account, not the caller ID: the channel is always named
+            # PJSIP/<account>-xxxx, whereas CallerIDNum only shows the caller ID
+            # if the PBX accepted the PAI - which is the very thing that may have
+            # failed. Matching on the account works either way.
+            expected_caller=CALLER_USER,
         )
 
         if not event:
@@ -825,11 +828,13 @@ class MyCall(pj.Call):
         prm.opt.videoCount = 0
         prm.opt.textCount = 0
 
-        if SEND_PAI:
-            # Asterisk prefers this over the From user for CALLERID(num) when the
-            # endpoint has trust_id_inbound=yes. Harmless when it does not.
+        # The only route a caller ID can travel: the From user is reserved for
+        # endpoint identification. Asterisk honours this when the endpoint has
+        # trust_id_inbound=yes, and ignores it otherwise, so sending it whenever
+        # a caller ID was asked for costs nothing.
+        if SEND_PAI or CALLER_ID_NUMBER != CALLER_USER:
             self.add_header(prm, "P-Asserted-Identity",
-                            f"<sip:{CALLER_ID_NUMBER}@{ASTERISK_HOST}>")
+                            f'"{CALLER_DISPLAY}" <sip:{CALLER_ID_NUMBER}@{ASTERISK_HOST}>')
 
         self.start_transfer_monitor()
         self.makeCall(self.dst_uri, prm)

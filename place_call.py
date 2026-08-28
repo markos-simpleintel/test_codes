@@ -261,7 +261,8 @@ def main(argv=None):
     print(f"  dial:  {config.DEST_URI}")
     print(f"  as:    caller_id={config.CALLER_ID_NUMBER} "
           f"(SIP account {config.CALLER_USER}, display {config.CALLER_DISPLAY})"
-          + ("  +P-Asserted-Identity" if config.SEND_PAI else ""))
+          + ("  +P-Asserted-Identity"
+             if config.SEND_PAI or config.CALLER_ID_NUMBER != config.CALLER_USER else ""))
     print(f"  audio: {audio_dir}")
 
     gaps = transfer_protection(config)
@@ -287,8 +288,11 @@ def main(argv=None):
         print("\n*** --allow-transfer given: this call MAY reach a live GSR agent.")
 
     if config.CALLER_ID_NUMBER != config.CALLER_USER:
-        print("*** caller ID differs from the SIP account. If the PBX ignores it, the log "
-              "line to check on the Asterisk box is: CALLER=<number> raw_cid=...")
+        print(f"*** caller ID {config.CALLER_ID_NUMBER} travels in P-Asserted-Identity; the "
+              f"call still\n    registers as account {config.CALLER_USER}, which is what "
+              f"Asterisk matches the\n    endpoint on. The PBX honours the assertion only "
+              f"with trust_id_inbound=yes.\n    Check afterwards: "
+              f"grep 'CALLER=' /var/log/asterisk/full | tail -3")
 
     print(f"\n*** the PBX records this call under "
           f"call_sessions/{config.CALLER_ID_NUMBER}/ on the Asterisk box\n")
