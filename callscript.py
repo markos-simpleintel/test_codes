@@ -146,26 +146,47 @@ def describe_wav(path, audio_dir, manifest):
 
 
 def check_wav(path):
-    """None if the file is playable, otherwise why it is not."""
+    """None if the file can be played at all, otherwise why it cannot.
+
+    Only unreadable and empty files are fatal. Rate, channel count and sample
+    width are NOT: pjsua2 resamples in createPlayer, and the recordings this
+    harness has always run with are 44.1 kHz. Treating those as errors refused
+    to place calls that work - see check_wav_format for the advisory version.
+    """
     try:
         with wave.open(str(path), "rb") as w:
-            rate, channels, width = w.getframerate(), w.getnchannels(), w.getsampwidth()
             frames = w.getnframes()
     except (OSError, wave.Error) as e:
         return f"not a readable WAV ({e})"
+    if frames == 0:
+        return "empty - no audio frames"
+    return None
+
+
+def check_wav_format(path):
+    """How a file differs from the PBX's native format, or None if it matches.
+
+    Advisory. Resampling is not free and not lossless, so a file that matches
+    8 kHz mono 16-bit is one less thing between the recording and what Jane
+    hears - but a mismatch plays fine.
+    """
+    try:
+        with wave.open(str(path), "rb") as w:
+            rate, channels, width = w.getframerate(), w.getnchannels(), w.getsampwidth()
+    except (OSError, wave.Error):
+        return None
 
     wrong = []
     if rate != WAV_RATE:
-        wrong.append(f"{rate} Hz (need {WAV_RATE})")
+        wrong.append(f"{rate} Hz")
     if channels != WAV_CHANNELS:
-        wrong.append(f"{channels} channels (need {WAV_CHANNELS})")
+        wrong.append(f"{channels} channels")
     if width != WAV_SAMPLE_WIDTH:
-        wrong.append(f"{width * 8}-bit (need {WAV_SAMPLE_WIDTH * 8}-bit PCM)")
-    if frames == 0:
-        wrong.append("no audio frames")
-    if wrong:
-        return ", ".join(wrong) + ". Convert with: sox in.wav -r 8000 -c 1 -b 16 out.wav"
-    return None
+        wrong.append(f"{width * 8}-bit")
+    if not wrong:
+        return None
+    return (", ".join(wrong) + f" (native is {WAV_RATE} Hz mono 16-bit; pjsua2 "
+            f"resamples). sox in.wav -r 8000 -c 1 -b 16 out.wav")
 
 
 def _substitute(value, variables, where):

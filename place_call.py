@@ -160,6 +160,7 @@ def check_audio_dir(audio_dir):
     print(f"{len(wavs)} wav file(s) under {directory}\n")
 
     bad = 0
+    resampled = 0
     undescribed = []
     for wav in wavs:
         rel = callscript.relative_name(wav, directory)
@@ -169,24 +170,35 @@ def check_audio_dir(audio_dir):
             print(f"  BAD  {rel}")
             print(f"       {problem}")
             continue
+
         said = callscript.describe_wav(wav, directory, manifest)
         if said:
-            print(f'  ok   {rel:<32} "{said}"')
+            note = f'"{said}"'
         elif said == "":
-            print(f"  ok   {rel:<32} (silence)")
+            note = "(silence)"
         else:
             undescribed.append(rel)
-            print(f"  ok   {rel:<32} (not in manifest.json)")
+            note = "(not in manifest.json)"
+        print(f"  ok   {rel:<40} {note}")
+
+        fmt = callscript.check_wav_format(wav)
+        if fmt:
+            resampled += 1
+            print(f"       note: {fmt}")
 
     print()
     if bad:
-        print(f"{bad} file(s) cannot be played. Convert them, then re-run this.")
+        print(f"{bad} file(s) cannot be played at all. Replace them, then re-run this.")
+    if resampled:
+        print(f"{resampled} file(s) are not 8 kHz mono 16-bit. They still play - pjsua2 "
+              f"resamples them -\n    but converting removes a step between the "
+              f"recording and what Jane hears.")
     if undescribed:
         print(f"{len(undescribed)} file(s) have no line in {directory / 'manifest.json'}. "
               f"They still play; adding one labels them in the log and lets "
               f"check_transcripts.py score them.")
-    if not bad and not undescribed:
-        print("every file is playable and described.")
+    if not bad and not undescribed and not resampled:
+        print("every file is playable, native format, and described.")
     return 1 if bad else 0
 
 
