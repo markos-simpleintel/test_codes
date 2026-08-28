@@ -1,0 +1,26 @@
+{
+  "name": "catherine-williams-schedule-dtmf",
+  "notes": "catherine-williams-schedule with the keypad step, for when the caller ID does not match her record. Jane fails the lookup on caller ID, asks for the number, and the rest of the conversation is identical from there. THIS WRITES TO ROYAL - the yes at step 14 is the booking. Pass the number with --dtmf.",
+  "vars": {
+    "phone": ""
+  },
+  "steps": [
+    { "say": "catherine-williams/Name.wav" },
+    { "say": "catherine-williams/DOB.wav" },
+    { "press": "{phone}", "note": "her phone number on the order" },
+    { "say": "catherine-williams/yes.wav", "note": "schedule the x-ray today" },
+    { "say": "catherine-williams/yes.wav", "note": "mailing address correct" },
+    { "say": "catherine-williams/yes.wav", "note": "billing to self pay" },
+    { "say": "catherine-williams/Height.wav" },
+    { "say": "catherine-williams/Weight.wav" },
+    { "say": "catherine-williams/no.wav", "note": "pregnant" },
+    { "say": "catherine-williams/no.wav", "note": "difficulty walking" },
+    { "say": "catherine-williams/no.wav", "note": "service animal" },
+    { "say": "catherine-williams/no.wav", "note": "bringing children" },
+    { "say": "catherine-williams/no.wav", "note": "special liquid in past 2 days" },
+    { "say": "catherine-williams/Preffered_location.wav", "note": "anchorage" },
+    { "say": "catherine-williams/yes.wav", "note": "BOOKS THE SLOT" },
+    { "say": "catherine-williams/no.wav", "note": "nothing else needed" },
+    { "hangup": true }
+  ]
+}

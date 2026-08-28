@@ -1,0 +1,66 @@
+{
+  "name": "catherine-williams-schedule",
+  "notes": "Books a real appointment. Turn-for-turn from the captured transcript: identify, accept the X-ray of the left knee, confirm address and billing, screening, Anchorage, then accept the offered slot. THIS WRITES TO ROYAL - the yes at step 14 is the booking. Calls from 4846340953, the number on the exam, which is what Jane matches her on - so there is no keypad step. If the PBX will not carry that caller ID, Jane asks for the number instead and every turn after shifts by one; catherine-williams-schedule-dtmf is the same conversation with the keypad step in place.",
+  "caller_id": "4846340953",
+  "steps": [
+    {
+      "say": "catherine-williams/Name.wav"
+    },
+    {
+      "say": "catherine-williams/DOB.wav"
+    },
+    {
+      "say": "catherine-williams/yes.wav",
+      "note": "schedule the x-ray today"
+    },
+    {
+      "say": "catherine-williams/yes.wav",
+      "note": "mailing address correct"
+    },
+    {
+      "say": "catherine-williams/yes.wav",
+      "note": "billing to self pay"
+    },
+    {
+      "say": "catherine-williams/Height.wav"
+    },
+    {
+      "say": "catherine-williams/Weight.wav"
+    },
+    {
+      "say": "catherine-williams/no.wav",
+      "note": "pregnant"
+    },
+    {
+      "say": "catherine-williams/no.wav",
+      "note": "difficulty walking"
+    },
+    {
+      "say": "catherine-williams/no.wav",
+      "note": "service animal"
+    },
+    {
+      "say": "catherine-williams/no.wav",
+      "note": "bringing children"
+    },
+    {
+      "say": "catherine-williams/no.wav",
+      "note": "special liquid in past 2 days"
+    },
+    {
+      "say": "catherine-williams/Preffered_location.wav",
+      "note": "anchorage"
+    },
+    {
+      "say": "catherine-williams/yes.wav",
+      "note": "BOOKS THE SLOT"
+    },
+    {
+      "say": "catherine-williams/no.wav",
+      "note": "nothing else needed"
+    },
+    {
+      "hangup": true
+    }
+  ]
+}

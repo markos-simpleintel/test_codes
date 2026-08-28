@@ -208,6 +208,11 @@ def main(argv=None):
     # Set before importing config: it reads the environment once, at import, and
     # pjsip_helpers copies the values it needs at import too. Overriding the
     # module attributes afterwards would leave the SIP account built from .env.
+    # A scenario may name the number it has to call from - Jane matches a patient
+    # on it, so for some scripts it is part of the script, not a per-run choice.
+    # --caller-id still wins, and .env fills in when neither names one.
+    caller_id = args.caller_id or callscript.peek_caller_id(args.scenario)
+
     # CALLER_USER goes in before CALLER_ID_NUMBER is read, so an unset
     # --caller-id still defaults to whatever account we authenticate as.
     for value, name in (
@@ -215,7 +220,7 @@ def main(argv=None):
         (args.caller_user, "CALLER_USER"),
         (args.caller_pass, "CALLER_PASS"),
         (args.caller_display, "CALLER_DISPLAY"),
-        (args.caller_id, "CALLER_ID_NUMBER"),
+        (caller_id, "CALLER_ID_NUMBER"),
         (args.dest, "DEST_NUMBER"),
     ):
         if value:

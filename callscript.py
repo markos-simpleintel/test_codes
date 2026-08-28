@@ -97,6 +97,23 @@ def resolve_scenario_path(scenario, scenario_dir=SCENARIO_DIR):
     )
 
 
+def peek_caller_id(scenario, scenario_dir=SCENARIO_DIR):
+    """A scenario's own caller_id, read before config is imported.
+
+    The SIP account is built from environment variables at import time, so a
+    scenario that names the number it must call from has to be consulted before
+    that happens. Returns "" when the file names none, or cannot be read - the
+    full load() reports those errors properly a moment later.
+    """
+    try:
+        path = resolve_scenario_path(scenario, scenario_dir)
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return str(data.get("caller_id") or "")
+    except (ScriptError, OSError, ValueError, AttributeError):
+        return ""
+
+
 def load_manifest(audio_dir):
     """Filename to spoken text. Missing or unreadable is not an error - the
     manifest only makes logs and transcript scoring readable."""
