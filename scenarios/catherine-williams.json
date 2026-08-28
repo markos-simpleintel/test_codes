@@ -1,0 +1,27 @@
+{
+  "name": "catherine-williams",
+  "notes": "The pbx-ladder walked with Catherine Williams' recordings instead of Marcos Test's. Identification, screening, then one scheduling answer. It ENDS ON HANGUP rather than running out of script: SCHEDULING is where slots are offered, and accepting one is a real Royal write (schedule_visit.py), so the call is cut before any answer can land on an offer. FILL IN {phone} - her order number - before running; the DOB and name alone will not find her, the lookup is DOB plus phone.",
+  "vars": {
+    "phone": ""
+  },
+  "steps": [
+    { "say": "catherine-williams/Name.wav" },
+    { "say": "catherine-williams/DOB.wav" },
+    { "press": "{phone}" },
+    { "say": "catherine-williams/yes.wav" },
+    { "say": "catherine-williams/yes.wav" },
+    { "say": "catherine-williams/yes.wav" },
+    { "say": "catherine-williams/Height.wav" },
+    { "say": "catherine-williams/Weight.wav" },
+    { "say": "catherine-williams/no.wav" },
+    { "say": "catherine-williams/no.wav" },
+    { "say": "catherine-williams/no.wav" },
+    { "say": "catherine-williams/no.wav" },
+    { "say": "catherine-williams/no.wav" },
+    { "say": "catherine-williams/no.wav" },
+    { "say": "catherine-williams/no.wav" },
+    { "say": "catherine-williams/no.wav" },
+    { "say": "catherine-williams/Preffered_location.wav" },
+    { "hangup": true }
+  ]
+}

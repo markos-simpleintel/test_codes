@@ -111,6 +111,23 @@ def load_manifest(audio_dir):
     return {k: v for k, v in data.items() if not k.startswith("_")}
 
 
+def relative_name(path, audio_dir):
+    """How a file is written in a scenario: "yes.wav", "catherine/name.wav"."""
+    try:
+        return Path(path).relative_to(Path(audio_dir)).as_posix()
+    except ValueError:
+        return Path(path).name
+
+
+def describe_wav(path, audio_dir, manifest):
+    """What a recording says. A subfolder file can be listed either by its path
+    or by its bare name, so shared answers need one entry, not one per folder."""
+    rel = relative_name(path, audio_dir)
+    if rel in manifest:
+        return manifest[rel]
+    return manifest.get(Path(path).name)
+
+
 def check_wav(path):
     """None if the file is playable, otherwise why it is not."""
     try:
@@ -162,8 +179,11 @@ def _step_verb(raw, where):
 def _resolve_say(raw, variables, audio_dir, manifest, check_audio, where, index):
     name = _substitute(str(raw["say"]), variables, where)
     path = Path(name)
-    if not path.is_absolute() and path.parent == Path("."):
-        path = Path(audio_dir) / name
+    # Any relative path resolves under the audio dir, subfolders included, so one
+    # patient's recordings can live in their own folder next to the shared
+    # yes/no answers: {"say": "catherine-williams/name.wav"}.
+    if not path.is_absolute():
+        path = Path(audio_dir) / path
     if not path.exists():
         raise ScriptError(
             f"{where}: no audio file {path}. Put it in {audio_dir}, or pass --audio-dir."
@@ -171,9 +191,10 @@ def _resolve_say(raw, variables, audio_dir, manifest, check_audio, where, index)
     if check_audio:
         problem = check_wav(path)
         if problem:
-            raise ScriptError(f"{where}: {path.name} is {problem}")
-    said = manifest.get(path.name)
-    label = f"say   {path.name}" + (f'  "{said}"' if said else "")
+            raise ScriptError(f"{where}: {name} is {problem}")
+    said = describe_wav(path, audio_dir, manifest)
+    shown = relative_name(path, audio_dir)
+    label = f"say   {shown}" + (f'  "{said}"' if said else "")
     return Step(index, "wav", str(path), label)
 
 

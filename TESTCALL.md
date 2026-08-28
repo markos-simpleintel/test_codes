@@ -71,6 +71,51 @@ which it took, so one call settles it:
 grep 'CALLER=' /var/log/asterisk/full | tail -5      # CALLER=... raw_cid=...
 ```
 
+## Two things a test call must never do
+
+### Reach a live GSR agent
+
+The dialplan transfers with `Dial(PJSIP/368@CUCM_Trunk)` - not a SIP REFER - so
+there is no request to decline. The channel is bridged and a real person picks up
+a robot. The **only** thing that catches it is the AMI event listener, which
+notices the transfer dialplan and hangs up first.
+
+Every part of that is off or empty by default, so `place_call.py` refuses to dial
+until it is armed:
+
+```
+*** live-agent transfer would NOT be blocked. Missing from .env:
+      USE_AMI_READY_EVENTS=1   (starts the AMI listener at all)
+      AMI_USER=<user>          (from the PBX manager.conf)
+      AMI_SECRET=<secret>
+```
+
+Fill those in and the preflight prints instead:
+
+```
+  guard: live-agent transfer is detected over AMI and hung up on
+```
+
+A failed AMI connection is fatal too - it used to print a warning and place the
+call anyway. `--allow-transfer` is the deliberate override, for when reaching a
+live agent is the thing being tested; it says so loudly before dialling.
+
+### Book a real appointment
+
+Jane has no test mode. Accepting an offered slot is a real write
+(`schedule_visit.py`), and so is completing a cancellation (`cancel_visit.py`).
+The audio harness cannot read Jane's replies as text, so unlike the text-path
+load runner it **cannot** detect a slot offer and abort. The script is the only
+guard, which means:
+
+- End the script with `hangup` before the SCHEDULING state can offer anything.
+  `catherine-williams.json` does exactly this - its last answer is the location
+  preference, then it hangs up.
+- Never put a `say yes.wav` where a slot offer could land. A desynced script is
+  how an accidental booking happens.
+- Finishing screening does submit for real (`screening.py`). That is accepted -
+  the text load runs do it too - but it is a write, so know that it happened.
+
 ## Writing a script
 
 One JSON file per script in `scenarios/`. One step per turn — the harness plays
@@ -179,6 +224,7 @@ The harness prints that directory when it starts. The run's own log goes to
     --max-seconds  hang up after this long regardless
     --pai          also send P-Asserted-Identity
     --no-audio-check   skip the 8 kHz / mono / 16-bit check
+    --allow-transfer   dial even though a live-agent transfer could not be stopped
     --check-audio  check every wav in the audio dir and exit
     --list         list scripts and exit
     --show         resolve the script, print it, dial nothing

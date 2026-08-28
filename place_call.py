@@ -76,6 +76,9 @@ def parse_args(argv=None):
                    help="skip the 8 kHz / mono / 16-bit check on each wav")
     p.add_argument("--check-audio", action="store_true",
                    help="check every wav in the audio dir and exit, without calling")
+    p.add_argument("--allow-transfer", action="store_true",
+                   help="place the call even with no way to stop it bridging to a live "
+                        "GSR agent. Only for deliberately testing the transfer path")
     p.add_argument("--list", action="store_true", help="list scenarios and exit")
     p.add_argument("--show", action="store_true",
                    help="print the resolved script and exit without calling")
@@ -113,6 +116,28 @@ def list_scenarios():
     return 0
 
 
+def transfer_protection(config):
+    """What is missing before a transfer to a live agent would be caught.
+
+    The dialplan reaches GSR with Dial(PJSIP/368@CUCM_Trunk), not a REFER, so
+    there is no SIP request to decline - the channel is simply bridged and a real
+    person answers a robot. The AMI event listener is the only thing that sees it
+    coming, and every part of that is off or empty by default.
+    """
+    missing = []
+    if not config.USE_AMI_READY_EVENTS:
+        missing.append("USE_AMI_READY_EVENTS=1   (starts the AMI listener at all)")
+    if not config.AMI_DETECT_TRANSFER:
+        missing.append("AMI_DETECT_TRANSFER=1    (watch for the transfer dialplan)")
+    if not config.HANGUP_ON_AMI_TRANSFER:
+        missing.append("HANGUP_ON_AMI_TRANSFER=1 (hang up instead of staying bridged)")
+    if not config.AMI_USER:
+        missing.append("AMI_USER=<user>          (from the PBX manager.conf)")
+    if not config.AMI_SECRET:
+        missing.append("AMI_SECRET=<secret>")
+    return missing
+
+
 def check_audio_dir(audio_dir):
     """Report every wav in the dir: playable, and what it says.
 
@@ -124,29 +149,34 @@ def check_audio_dir(audio_dir):
         print(f"no audio dir {directory}")
         return 1
 
-    wavs = sorted(directory.glob("*.wav"))
+    # Recursive, so a per-patient subfolder is checked along with the shared
+    # answers at the top level.
+    wavs = sorted(directory.rglob("*.wav"))
     if not wavs:
         print(f"no .wav files in {directory}")
         return 1
 
     manifest = callscript.load_manifest(directory)
-    print(f"{len(wavs)} wav file(s) in {directory}\n")
+    print(f"{len(wavs)} wav file(s) under {directory}\n")
 
     bad = 0
     undescribed = []
     for wav in wavs:
+        rel = callscript.relative_name(wav, directory)
         problem = callscript.check_wav(wav)
         if problem:
             bad += 1
-            print(f"  BAD  {wav.name}")
+            print(f"  BAD  {rel}")
             print(f"       {problem}")
             continue
-        said = manifest.get(wav.name)
-        if said is None and wav.name not in manifest:
-            undescribed.append(wav.name)
-            print(f"  ok   {wav.name:<24} (not in manifest.json)")
+        said = callscript.describe_wav(wav, directory, manifest)
+        if said:
+            print(f'  ok   {rel:<32} "{said}"')
+        elif said == "":
+            print(f"  ok   {rel:<32} (silence)")
         else:
-            print(f"  ok   {wav.name:<24} \"{said}\"" if said else f"  ok   {wav.name}")
+            undescribed.append(rel)
+            print(f"  ok   {rel:<32} (not in manifest.json)")
 
     print()
     if bad:
@@ -217,9 +247,27 @@ def main(argv=None):
           + ("  +P-Asserted-Identity" if config.SEND_PAI else ""))
     print(f"  audio: {audio_dir}")
 
+    gaps = transfer_protection(config)
+    if gaps:
+        print("\n*** live-agent transfer would NOT be blocked. Missing from .env:")
+        for line in gaps:
+            print(f"      {line}")
+        print("    The dialplan bridges to GSR with Dial(), not a REFER, so without the "
+              "AMI\n    listener nothing sees the transfer and a real person answers "
+              "this call.")
+    else:
+        print("  guard: live-agent transfer is detected over AMI and hung up on")
+
     if args.show:
         print("\n--show given, so nothing was dialled.")
         return 0
+
+    if gaps and not args.allow_transfer:
+        print("\n*** refusing to dial. Fill those in, or pass --allow-transfer if "
+              "reaching a\n    live agent is the thing you mean to test.", file=sys.stderr)
+        return 3
+    if gaps:
+        print("\n*** --allow-transfer given: this call MAY reach a live GSR agent.")
 
     if config.CALLER_ID_NUMBER != config.CALLER_USER:
         print("*** caller ID differs from the SIP account. If the PBX ignores it, the log "
@@ -241,6 +289,7 @@ def main(argv=None):
                                      f"caller_id={config.CALLER_ID_NUMBER} "
                                      f"steps={len(script.steps)}",
             max_call_seconds=args.max_seconds,
+            require_ami=not args.allow_transfer,
         )
     return 0
 

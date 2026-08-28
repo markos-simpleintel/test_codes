@@ -1,5 +1,6 @@
 {
-  "_notes": "What each recording says, so a script reads as English and check_transcripts.py can score what the system heard against it. Add a line when you add a wav. null means nobody has confirmed the wording yet - it is skipped rather than scored.",
+  "_notes": "What each recording says, so a script reads as English and check_transcripts.py can score what the system heard against it. Add a line when you add a wav. A file in a subfolder can be listed by its path or by its bare name. null means nobody has confirmed the wording yet - it is skipped rather than scored.",
+
   "name2.wav": "my name is marcos test",
   "birthday2.wav": "january 1 1993",
   "yes.wav": "yes",
@@ -7,5 +8,13 @@
   "height.wav": null,
   "weight.wav": null,
   "palmer.wav": null,
-  "silence_60s.wav": ""
+  "silence_60s.wav": "",
+
+  "catherine-williams/Name.wav": null,
+  "catherine-williams/DOB.wav": null,
+  "catherine-williams/Height.wav": null,
+  "catherine-williams/Weight.wav": null,
+  "catherine-williams/Preffered_location.wav": null,
+  "catherine-williams/yes.wav": "yes",
+  "catherine-williams/no.wav": "no"
 }

@@ -41,7 +41,7 @@ from run_logging import setup_run_logging
 
 
 def main(dest_uri=None, num_calls=None, actions_provider=None,
-         describe=None, max_call_seconds=None):
+         describe=None, max_call_seconds=None, require_ami=False):
     """Place calls and tear down cleanly.
 
     Everything is optional and falls back to .env, so `main()` behaves exactly
@@ -94,7 +94,23 @@ def main(dest_uri=None, num_calls=None, actions_provider=None,
                 )
             except Exception as e:
                 ami_ready_events = None
+                # Without AMI there is no transfer detection, and the dialplan
+                # bridges to a live GSR agent with Dial() rather than a REFER we
+                # could decline. A caller that asked for that protection must not
+                # get a call placed without it.
+                if require_ami:
+                    raise RuntimeError(
+                        f"AMI listener would not start ({e}), so a transfer to a "
+                        f"live agent could not be detected or stopped. Refusing to "
+                        f"place the call."
+                    ) from None
                 print(f"*** AMI listener unavailable; using RTP silence detection: {e}")
+
+        if require_ami and ami_ready_events is None:
+            raise RuntimeError(
+                "transfer protection was required but USE_AMI_READY_EVENTS is off, "
+                "so nothing would stop this call bridging to a live agent."
+            )
 
         bind_ip = get_bind_ip()
         print(f"*** chosen local bind IP: {bind_ip}")
