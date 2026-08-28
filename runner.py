@@ -40,7 +40,21 @@ from pjsip_helpers import (
 from run_logging import setup_run_logging
 
 
-def main():
+def main(dest_uri=None, num_calls=None, actions_provider=None,
+         describe=None, max_call_seconds=None):
+    """Place calls and tear down cleanly.
+
+    Everything is optional and falls back to .env, so `main()` behaves exactly
+    as it did. place_call.py passes a script in instead - one call, its own
+    actions - rather than owning a second copy of this teardown, which is where
+    the pjsua2 shutdown ordering that took a while to get right lives.
+    """
+    dest_uri = dest_uri or DEST_URI
+    num_calls = NUM_CALLS if num_calls is None else num_calls
+    actions_provider = actions_provider or actions_for
+    describe = describe or describe_identity
+    max_call_seconds = MAX_CALL_SECONDS if max_call_seconds is None else max_call_seconds
+
     ep = pj.Endpoint()
     acc = None
     calls = []
@@ -105,10 +119,10 @@ def main():
         acc.create(acfg)
 
         print("*** account created without registration")
-        print(f"*** starting {NUM_CALLS} direct INVITE call(s)")
+        print(f"*** starting {num_calls} direct INVITE call(s)")
 
         failed_to_start = 0
-        for call_id in range(1, NUM_CALLS + 1):
+        for call_id in range(1, num_calls + 1):
             # Each call is started inside its own guard. Letting one failure
             # escape to the outer handler sends control straight to `finally`,
             # which hangs up every call that was working - so a single refused
@@ -118,14 +132,14 @@ def main():
                     ep=ep,
                     acc=acc,
                     call_id=call_id,
-                    dst_uri=DEST_URI,
-                    actions=actions_for(call_id),
+                    dst_uri=dest_uri,
+                    actions=actions_provider(call_id),
                     silence_wav=SILENCE_PAD_WAV,
                     ami_ready_events=ami_ready_events,
                 )
                 calls.append(call)
-                call.log(f"starting direct INVITE call to {DEST_URI} "
-                         f"[{describe_identity(call_id)}]")
+                call.log(f"starting direct INVITE call to {dest_uri} "
+                         f"[{describe(call_id)}]")
                 call.start()
             except pj.Error as e:
                 failed_to_start += 1
@@ -135,15 +149,15 @@ def main():
                 failed_to_start += 1
                 print(f"*** call {call_id} could not start: {e} - continuing")
 
-            if call_id < NUM_CALLS and CALL_START_GAP_MS > 0:
+            if call_id < num_calls and CALL_START_GAP_MS > 0:
                 time.sleep(CALL_START_GAP_MS / 1000.0)
 
         if failed_to_start:
-            print(f"*** {failed_to_start} of {NUM_CALLS} calls failed to start; "
+            print(f"*** {failed_to_start} of {num_calls} calls failed to start; "
                   f"continuing with {len(calls)}")
 
         started = time.time()
-        while time.time() - started < MAX_CALL_SECONDS:
+        while time.time() - started < max_call_seconds:
             active_calls = [call for call in calls if not call.disconnected]
             if not active_calls:
                 break

@@ -1,0 +1,11 @@
+{
+  "_notes": "What each recording says, so a script reads as English and check_transcripts.py can score what the system heard against it. Add a line when you add a wav. null means nobody has confirmed the wording yet - it is skipped rather than scored.",
+  "name2.wav": "my name is marcos test",
+  "birthday2.wav": "january 1 1993",
+  "yes.wav": "yes",
+  "no.wav": "no",
+  "height.wav": null,
+  "weight.wav": null,
+  "palmer.wav": null,
+  "silence_60s.wav": ""
+}

@@ -4,6 +4,7 @@ import pjsua2 as pj
 from config import (
     ASTERISK_HOST,
     CALLER_DISPLAY,
+    CALLER_ID_NUMBER,
     CALLER_PASS,
     CALLER_USER,
     FORCE_BIND_IP,
@@ -177,7 +178,9 @@ def configure_endpoint(ep_cfg: pj.EpConfig):
 def build_account_config(bind_ip: str, transport_id: int) -> pj.AccountConfig:
     acfg = pj.AccountConfig()
 
-    acfg.idUri = f'"{CALLER_DISPLAY}" <sip:{CALLER_USER}@{ASTERISK_HOST}>'
+    # From-header user, which is what the dialplan turns into CALLERID(num).
+    # Defaults to CALLER_USER, so an unset CALLER_ID_NUMBER dials as before.
+    acfg.idUri = f'"{CALLER_DISPLAY}" <sip:{CALLER_ID_NUMBER}@{ASTERISK_HOST}>'
     acfg.regConfig.registerOnAdd = False
 
     safe_set(acfg.sipConfig, "transportId", transport_id)

@@ -15,6 +15,22 @@ CALLER_USER = os.getenv("CALLER_USER", "1001")
 CALLER_PASS = os.getenv("CALLER_PASS", "")
 CALLER_DISPLAY = os.getenv("CALLER_DISPLAY", "Rahul")
 
+# --- caller ID, separate from the SIP account -------------------------------
+#
+# The dialplan reads CALLERID(num) and uses it as the patient's phone number
+# (extensions_custom.conf: CALLER=${FILTER(0-9,${CALLERID(num)})}), so the
+# number the PBX thinks is calling decides which patient is looked up. It used
+# to be CALLER_USER, which is also the digest auth username - meaning testing a
+# different caller needed a different PBX account.
+#
+# CALLER_ID_NUMBER is the From-header user; auth stays on CALLER_USER, so one
+# SIP account can present different numbers. SEND_PAI additionally sends
+# P-Asserted-Identity, which Asterisk prefers when the endpoint has
+# trust_id_inbound=yes. Whichever the PBX takes, the dialplan logs what it
+# decided: NoOp CALLER=... raw_cid=...
+CALLER_ID_NUMBER = os.getenv("CALLER_ID_NUMBER", "") or CALLER_USER
+SEND_PAI = os.getenv("SEND_PAI", "").strip().lower() in ("1", "true", "yes", "on")
+
 DEST_NUMBER = os.getenv("DEST_NUMBER", "19073750302")
 DEST_URI = f"sip:{DEST_NUMBER}@{ASTERISK_HOST}:{REMOTE_SIP_PORT}"
 INPUT_AUDIO_DIR = Path(os.getenv("INPUT_AUDIO_DIR", "input_audios"))

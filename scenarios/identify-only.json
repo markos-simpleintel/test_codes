@@ -1,0 +1,14 @@
+{
+  "name": "identify-only",
+  "notes": "Stops once the patient is matched. The cheapest call that still exercises MATCH_GUEST, the DTMF capture chain and a Royal read - use it when the question is whether identification works at all, not how the whole conversation goes. Hangs up rather than answering the first screening question.",
+  "vars": {
+    "phone": "5408249373"
+  },
+  "steps": [
+    { "say": "name2.wav" },
+    { "say": "birthday2.wav" },
+    { "press": "{phone}" },
+    { "wait": 3 },
+    { "hangup": true }
+  ]
+}

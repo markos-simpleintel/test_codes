@@ -1,0 +1,26 @@
+{
+  "name": "pbx-ladder",
+  "notes": "The validated PBX ladder: name and DOB spoken, the order number keyed in where the PBX asks for DTMF, then the screening questions. Turn-for-turn the same script as loadtest/scenarios/jane/default.json's pbx-parity, so an audio run and a text run are comparable. Runs past the screening questions and ends in Jane's understanding-error transfer, which is the deterministic baseline.",
+  "vars": {
+    "phone": "5408249373"
+  },
+  "steps": [
+    { "say": "name2.wav" },
+    { "say": "birthday2.wav" },
+    { "press": "{phone}" },
+    { "say": "yes.wav" },
+    { "say": "yes.wav" },
+    { "say": "yes.wav" },
+    { "say": "height.wav" },
+    { "say": "weight.wav" },
+    { "say": "no.wav" },
+    { "say": "no.wav" },
+    { "say": "no.wav" },
+    { "say": "no.wav" },
+    { "say": "no.wav" },
+    { "say": "no.wav" },
+    { "say": "no.wav" },
+    { "say": "no.wav" },
+    { "say": "no.wav" }
+  ]
+}

@@ -7,12 +7,14 @@ import time
 import pjsua2 as pj
 
 from config import (
-    CALLER_USER,
+    ASTERISK_HOST,
+    CALLER_ID_NUMBER,
     HANGUP_ON_AMI_TRANSFER,
     INITIAL_WAIT_TIMEOUT_SECS,
     NEXT_TURN_WAIT_TIMEOUT_SECS,
     POLL_MS,
     POST_REDIRECT_TOTAL_SILENCE_MS,
+    SEND_PAI,
     SILENCE_AFTER_VOICE_MS,
     VOICE_ENERGY_THRESHOLD,
 )
@@ -228,7 +230,10 @@ class MyCall(pj.Call):
             sequence,
             timeout_secs=10,
             stop_evt=self._stop_evt,
-            expected_caller=CALLER_USER,
+            # Matched against the AMI event's CallerIDNum/Channel, which carry the
+            # From-header number, not the auth username. Same value while
+            # CALLER_ID_NUMBER is unset; only diverges once a call overrides it.
+            expected_caller=CALLER_ID_NUMBER,
         )
 
         if not event:
@@ -625,6 +630,28 @@ class MyCall(pj.Call):
         self.log("DTMF sequence complete")
         self.on_action_complete(expected_idx=expected_idx)
 
+    def _register_thread(self, label):
+        # Every pjsua2 call has to come from a thread PJLIB knows about, and
+        # both of the workers below end up making them - the keepalive player on
+        # the way out of a wait, hangup() directly.
+        try:
+            self.ep.libRegisterThread(f"{label}-{self.call_id}")
+        except pj.Error as e:
+            self.log(f"libRegisterThread warning ({label}): {e}")
+        except Exception as e:                              # noqa: BLE001
+            self.log(f"libRegisterThread unexpected error ({label}): {e}")
+
+    def _wait_silently(self, seconds, expected_idx):
+        self._register_thread("wait-step")
+        self.log(f"staying silent for {seconds:g}s")
+        # Woken by _stop_evt so a hangup during a long wait ends the thread
+        # rather than leaving the teardown to join on it.
+        if self._stop_evt.wait(timeout=seconds):
+            self.log("wait cut short - call ended")
+            return
+        self.log("wait finished")
+        self.on_action_complete(expected_idx=expected_idx)
+
     def start_next_action(self):
         # Logged before the lock, because taking the lock is itself a place this
         # can stop: the media thread grabs it on every RTP frame. A call whose
@@ -696,6 +723,23 @@ class MyCall(pj.Call):
             ).start()
             return
 
+        if action_type == "wait":
+            # Deliberate silence, so a script can test the PBX's re-ask timer.
+            # The keepalive is what puts that silence on the wire - it was
+            # stopped above for the playback case, so start it again here.
+            self.start_rtp_keepalive()
+            threading.Thread(
+                target=self._wait_silently,
+                args=(float(action_value), expected_idx),
+                daemon=True,
+            ).start()
+            return
+
+        if action_type == "hangup":
+            self.log("script asked to hang up")
+            threading.Thread(target=self._hangup_from_script, daemon=True).start()
+            return
+
         self.log(f"unknown action type: {action_type}")
         self.on_action_complete(expected_idx=expected_idx)
 
@@ -757,15 +801,36 @@ class MyCall(pj.Call):
         except Exception:
             pass
 
+    def _hangup_from_script(self):
+        self._register_thread("hangup-step")
+        self.safe_hangup()
+
     def _hangup_after_transfer(self):
         time.sleep(0.3)
         self.safe_hangup()
+
+    def add_header(self, prm, name, value):
+        try:
+            hdr = pj.SipHeader()
+            hdr.hName = name
+            hdr.hValue = value
+            prm.txOption.headers.append(hdr)
+            self.log(f"sending {name}: {value}")
+        except Exception as e:                              # noqa: BLE001
+            self.log(f"could not add {name} header: {e}")
 
     def start(self):
         prm = pj.CallOpParam(True)
         prm.opt.audioCount = 1
         prm.opt.videoCount = 0
         prm.opt.textCount = 0
+
+        if SEND_PAI:
+            # Asterisk prefers this over the From user for CALLERID(num) when the
+            # endpoint has trust_id_inbound=yes. Harmless when it does not.
+            self.add_header(prm, "P-Asserted-Identity",
+                            f"<sip:{CALLER_ID_NUMBER}@{ASTERISK_HOST}>")
+
         self.start_transfer_monitor()
         self.makeCall(self.dst_uri, prm)
 

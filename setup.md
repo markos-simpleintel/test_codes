@@ -6,8 +6,12 @@ finishes speaking (turn-taking), and records each call for review.
 
 | File | Tool | Use it for |
 |------|------|------------|
-| `pjsip_test_call.py` | Python + PJSUA2 | Functional tests — records audio, sends DTMF, smart turn-taking |
+| `place_call.py` | Python + PJSUA2 | One scripted call — pick a scenario, caller ID and DTMF digits from the command line. See **[TESTCALL.md](TESTCALL.md)** |
+| `pjsip_test_call.py` | Python + PJSUA2 | The same engine driven by `ACTIONS` in `config.py`, for concurrent runs |
 | `load_call.xml` | SIPp | High-volume load testing (many simultaneous calls) |
+
+Setup below is shared by all three. Once it is done, day-to-day single calls are
+in **[TESTCALL.md](TESTCALL.md)** — scripts, audio files, caller ID, DTMF.
 
 **Environment:** Ubuntu (native, or via WSL on Windows). The main dependency, `pjsua2`,
 is compiled from source — this is reliable on Ubuntu and difficult on native Windows, so
@@ -126,9 +130,12 @@ MEDIA_RTP_PORT=4000             # base RTP/audio port
 MEDIA_RTP_PORT_RANGE=400        # RTP port range (4000–4400)
 
 # --- Caller identity (must exist in the PBX) ---
-CALLER_USER=1001                # SIP username
+CALLER_USER=1001                # SIP username, used for digest auth
 CALLER_PASS=                    # SIP password (fill in)
 CALLER_DISPLAY=Rahul            # display name
+CALLER_ID_NUMBER=               # From-header number the PBX reads as CALLERID(num).
+                                # Blank = same as CALLER_USER. place_call.py --caller-id
+SEND_PAI=0                      # also send P-Asserted-Identity (see TESTCALL.md)
 
 # --- What to dial ---
 DEST_NUMBER=19073750302         # number / service the PBX routes
@@ -155,23 +162,28 @@ HANGUP_ON_AMI_TRANSFER=1        # set 0 to leave the transferred call connected
 Ask the PBX owner for the correct `CALLER_USER`, `CALLER_PASS`, and `DEST_NUMBER` —
 they must match accounts in the PBX's `pjsip.conf`.
 
-**Add the audio files.** The script plays these WAV files (format: 8000 Hz, mono,
-16-bit PCM), which must sit in the project folder:
+**Add the audio files.** The scripts play these WAV files (format: 8000 Hz, mono,
+16-bit PCM), which must sit in `input_audios/`:
 ```
 first.wav  name2.wav  birthday2.wav  yes.wav  no.wav
 height.wav  weight.wav  palmer.wav  silence_60s.wav
 ```
-Get these from whoever prepared the test. → *If a `.wav` is missing or wrong format, see **T5**.*
+Get these from whoever prepared the test. `input_audios/manifest.json` records
+what each one says; add a line when you add a file. → *If a `.wav` is missing or
+wrong format, see **T5**.*
 
 ---
 
 ## Step 7 — Run the test
-Run it **from the project folder** (the script looks for `.env` and the `.wav` files in the
-current folder):
+Run it **from the project folder** (the script looks for `.env` and for `input_audios/`
+relative to the current folder):
 ```bash
 cd ~/test_codes
-python3 pjsip_test_call.py
+python3 place_call.py                  # one call, the default scenario
+python3 place_call.py --list           # the scenarios available
 ```
+`pjsip_test_call.py` places `NUM_CALLS` calls from `ACTIONS` in `config.py` instead, and is
+what the load runs use.
 Expected log lines:
 ```
 *** PJSUA2 STARTED ***

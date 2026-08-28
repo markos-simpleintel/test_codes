@@ -1,0 +1,14 @@
+{
+  "name": "_template",
+  "notes": "Copy this file to make a new script. Every step is one turn: the harness plays or presses it, then waits for the PBX to finish its next reply before moving on. Exactly one verb key per step - say, press, wait or hangup. Any {placeholder} in a value is filled from vars below, then overridden by --var on the command line. {phone} and {caller_id} always exist, so --dtmf and --caller-id reach this script without editing it.",
+  "caller_id": null,
+  "vars": {
+    "phone": "5408249373"
+  },
+  "steps": [
+    { "say": "name2.wav", "note": "a wav in the audio dir (8000 Hz, mono, 16-bit)" },
+    { "press": "{phone}", "note": "DTMF digits, sent one at a time" },
+    { "wait": 6, "note": "seconds of silence - use it to test the re-ask timer" },
+    { "hangup": true, "note": "end the call instead of waiting out MAX_CALL_SECONDS" }
+  ]
+}

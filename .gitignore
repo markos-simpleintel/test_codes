@@ -3,3 +3,7 @@ call_recordings/
 logs/
 __pycache__/
 *.pyc
+
+# Recordings are large and shipped out of band; manifest.json is not.
+input_audios/*
+!input_audios/manifest.json
