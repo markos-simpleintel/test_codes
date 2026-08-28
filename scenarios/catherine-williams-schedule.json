@@ -1,6 +1,6 @@
 {
   "name": "catherine-williams-schedule",
-  "notes": "Books a real appointment. Turn-for-turn from the captured transcript: identify, accept the X-ray of the left knee, confirm address and billing, screening, Anchorage, then accept the offered slot. THIS WRITES TO ROYAL - the yes at step 14 is the booking. Calls from 4846340953, the number on the exam, which is what Jane matches her on - so there is no keypad step. If the PBX will not carry that caller ID, Jane asks for the number instead and every turn after shifts by one; catherine-williams-schedule-dtmf is the same conversation with the keypad step in place.",
+  "notes": "Books a real appointment, the no-keypad version - Jane matches her on the caller ID, exactly as in the captured transcript. DOES NOT WORK on the dev PBX as it stands: the route into Jane is gated on the caller ID being 1001, so asserting 4846340953 fails the gate and the call leaves over the trunk instead. Needs a route that does not gate on caller ID - try --dest 5100 - or use catherine-williams-schedule-dtmf, which works today. THIS WRITES TO ROYAL - the yes at step 14 is the booking.",
   "caller_id": "4846340953",
   "steps": [
     {
