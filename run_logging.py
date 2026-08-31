@@ -4,6 +4,31 @@ import sys
 import threading
 from pathlib import Path
 
+from config import LOG_LEVEL
+
+
+LOG_LEVELS = {
+    "QUIET": 0,
+    "ERROR": 1,
+    "INFO": 2,
+}
+ACTIVE_LOG_LEVEL = LOG_LEVELS.get(LOG_LEVEL, LOG_LEVELS["INFO"])
+_print_lock = threading.Lock()
+
+
+def log_message(message: str, level: str = "INFO"):
+    if LOG_LEVELS.get(level, LOG_LEVELS["INFO"]) <= ACTIVE_LOG_LEVEL:
+        with _print_lock:
+            print(message, flush=True)
+
+
+def log_info(message: str):
+    log_message(message, "INFO")
+
+
+def log_error(message: str):
+    log_message(message, "ERROR")
+
 
 class _NullRunLogger:
     path = None
