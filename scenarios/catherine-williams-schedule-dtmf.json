@@ -6,10 +6,10 @@
   },
   "steps": [
     {
-      "say": "catherine-williams/Name.wav"
+      "say": "catherine-williams/name.wav"
     },
     {
-      "say": "catherine-williams/DOB.wav"
+      "say": "catherine-williams/dob.wav"
     },
     {
       "press": "{phone}",
@@ -28,10 +28,10 @@
       "note": "billing to self pay"
     },
     {
-      "say": "catherine-williams/Height.wav"
+      "say": "catherine-williams/height.wav"
     },
     {
-      "say": "catherine-williams/Weight.wav"
+      "say": "catherine-williams/weight.wav"
     },
     {
       "say": "catherine-williams/no.wav",
@@ -54,7 +54,7 @@
       "note": "special liquid in past 2 days"
     },
     {
-      "say": "catherine-williams/Preffered_location.wav",
+      "say": "catherine-williams/anchorage.wav",
       "note": "anchorage"
     },
     {

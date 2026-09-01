@@ -8,11 +8,11 @@
   "weight.wav": null,
   "palmer.wav": null,
   "silence_60s.wav": "",
-  "catherine-williams/Name.wav": "catherine williams",
-  "catherine-williams/DOB.wav": "march 25th 1995",
-  "catherine-williams/Height.wav": "five nine",
-  "catherine-williams/Weight.wav": "one hundred and ninety pounds",
-  "catherine-williams/Preffered_location.wav": "anchorage",
   "catherine-williams/yes.wav": "yes",
-  "catherine-williams/no.wav": "no"
+  "catherine-williams/no.wav": "no",
+  "catherine-williams/name.wav": "catherine williams",
+  "catherine-williams/dob.wav": "march 25th 1995",
+  "catherine-williams/height.wav": "5 feet 9 inches",
+  "catherine-williams/weight.wav": "one hundred and ninety pounds",
+  "catherine-williams/anchorage.wav": "anchorage"
 }
