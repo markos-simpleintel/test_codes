@@ -19,6 +19,7 @@ from config import (
     INITIAL_WAIT_TIMEOUT_SECS,
     MEDIA_SETUP_ATTEMPTS,
     MEDIA_SETUP_RETRY_MS,
+    MIN_PROMPT_VOICE_MS,
     NEXT_TURN_WAIT_TIMEOUT_SECS,
     POLL_MS,
     POST_REDIRECT_TOTAL_SILENCE_MS,
@@ -153,6 +154,15 @@ class RemoteTap(pj.AudioMediaPort):
                 owner.remote_seen_voice = True
                 owner.last_voice_ts = time.time()
                 owner.voice_tick_count += 1
+                owner.current_voice_run_ms += (
+                    TX_FRAME_PTIME_MS * TAP_FRAME_DECIMATION
+                )
+                owner.max_continuous_voice_ms = max(
+                    owner.max_continuous_voice_ms,
+                    owner.current_voice_run_ms,
+                )
+            else:
+                owner.current_voice_run_ms = 0
         except Exception as exc:
             self.owner.log(f"remote tap frame error: {exc}", "ERROR")
 
@@ -204,10 +214,13 @@ class MyCall(pj.Call):
         self.last_voice_ts = 0.0
         self.last_frame_energy = 0.0
         self.voice_tick_count = 0
+        self.current_voice_run_ms = 0
+        self.max_continuous_voice_ms = 0
 
         self.current_wait_requires_prompt_start = False
         self.current_wait_merge_bridge_gap = False
         self.current_wait_min_voice_ms = 0
+        self.current_wait_min_continuous_voice_ms = 0
         self.current_wait_silence_ms = SILENCE_AFTER_VOICE_MS
         self.current_wait_ami_sequence = 0
         self.current_transfer_ami_sequence = 0
@@ -513,6 +526,9 @@ class MyCall(pj.Call):
             require_prompt_start = self.current_wait_requires_prompt_start
             merge_bridge_gap = self.current_wait_merge_bridge_gap
             min_voice_ms = self.current_wait_min_voice_ms
+            min_continuous_voice_ms = (
+                self.current_wait_min_continuous_voice_ms
+            )
             silence_ms = self.current_wait_silence_ms
 
         seen_voice = self.remote_seen_voice
@@ -534,6 +550,12 @@ class MyCall(pj.Call):
         voiced_ms = self.voice_tick_count * TX_FRAME_PTIME_MS * TAP_FRAME_DECIMATION
         if min_voice_ms and voiced_ms < min_voice_ms:
             return False
+        continuous_voice_ms = self.max_continuous_voice_ms
+        if (
+            min_continuous_voice_ms
+            and continuous_voice_ms < min_continuous_voice_ms
+        ):
+            return False
 
         if merge_bridge_gap:
             self.log(
@@ -543,6 +565,7 @@ class MyCall(pj.Call):
         else:
             self.log(
                 f"remote turn finished ({label}) voiced_ms={voiced_ms} "
+                f"continuous_voice_ms={continuous_voice_ms} "
                 f"silent_for_ms={silent_for_ms:.0f}"
             )
         return True
@@ -554,6 +577,7 @@ class MyCall(pj.Call):
         require_prompt_start,
         merge_bridge_gap,
         min_voice_ms=0,
+        min_continuous_voice_ms=0,
         silence_ms=None,
     ) -> str:
         effective_silence_ms = (
@@ -566,6 +590,7 @@ class MyCall(pj.Call):
             self.current_wait_requires_prompt_start = require_prompt_start
             self.current_wait_merge_bridge_gap = merge_bridge_gap
             self.current_wait_min_voice_ms = min_voice_ms
+            self.current_wait_min_continuous_voice_ms = min_continuous_voice_ms
             self.current_wait_silence_ms = effective_silence_ms
             if self.ami_ready_events is not None:
                 self.current_wait_ami_sequence = (
@@ -577,12 +602,16 @@ class MyCall(pj.Call):
         self.last_voice_ts = 0.0
         self.last_frame_energy = 0.0
         self.voice_tick_count = 0
+        self.current_voice_run_ms = 0
+        self.max_continuous_voice_ms = 0
 
         self.log(
             f"waiting for turn ({label}) "
             f"require_prompt_start={require_prompt_start} "
             f"merge_bridge_gap={merge_bridge_gap} "
-            f"min_voice_ms={min_voice_ms} silence_ms={effective_silence_ms}"
+            f"min_voice_ms={min_voice_ms} "
+            f"min_continuous_voice_ms={min_continuous_voice_ms} "
+            f"silence_ms={effective_silence_ms}"
         )
         started_at = time.time()
 
@@ -638,6 +667,7 @@ class MyCall(pj.Call):
                 self.current_wait_requires_prompt_start = False
                 self.current_wait_merge_bridge_gap = False
                 self.current_wait_min_voice_ms = 0
+                self.current_wait_min_continuous_voice_ms = 0
                 self.current_wait_silence_ms = SILENCE_AFTER_VOICE_MS
 
     def _play_wav(self, filename: str) -> bool:
@@ -761,6 +791,7 @@ class MyCall(pj.Call):
                 label="initial-remote-turn",
                 require_prompt_start=True,
                 merge_bridge_gap=False,
+                min_continuous_voice_ms=MIN_PROMPT_VOICE_MS,
             )
             if reason == "aborted":
                 return
@@ -801,6 +832,9 @@ class MyCall(pj.Call):
                     require_prompt_start=(action_type == "dtmf"),
                     merge_bridge_gap=(index == 0),
                     min_voice_ms=(DTMF_MIN_PROMPT_VOICE_MS if next_is_dtmf else 0),
+                    min_continuous_voice_ms=(
+                        0 if next_is_dtmf else MIN_PROMPT_VOICE_MS
+                    ),
                     silence_ms=(
                         DTMF_SILENCE_AFTER_VOICE_MS if next_is_dtmf else None
                     ),

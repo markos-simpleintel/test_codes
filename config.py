@@ -63,6 +63,7 @@ TAP_FRAME_DECIMATION = max(1, int(os.getenv("TAP_FRAME_DECIMATION", "5")))
 
 # Turn detection
 SILENCE_AFTER_VOICE_MS = int(os.getenv("SILENCE_AFTER_VOICE_MS", "1500"))
+MIN_PROMPT_VOICE_MS = int(os.getenv("MIN_PROMPT_VOICE_MS", "500"))
 POLL_MS = int(os.getenv("POLL_MS", "100"))
 POST_REDIRECT_TOTAL_SILENCE_MS = int(
     os.getenv("POST_REDIRECT_TOTAL_SILENCE_MS", "2")
@@ -155,5 +156,7 @@ def validate_config() -> None:
         raise ValueError("TX_CLOCK_RATE must produce a non-zero 20 ms frame")
     if MEDIA_SETUP_ATTEMPTS < 1:
         raise ValueError("MEDIA_SETUP_ATTEMPTS must be at least 1")
+    if MIN_PROMPT_VOICE_MS < 0:
+        raise ValueError("MIN_PROMPT_VOICE_MS cannot be negative")
     if DTMF_DURATION_MS < 40:
         raise ValueError("DTMF_DURATION_MS must be at least 40 ms")
