@@ -462,21 +462,25 @@ class MyCall(pj.Call):
             self.log("remote tap is required for turn detection", "ERROR")
             return False
 
-        try:
-            recorder = pj.AudioMediaRecorder()
-            with MEDIA_GRAPH_LOCK:
-                recorder.createRecorder(self.mixed_recording)
-            self.mixed_recorder = recorder
-            remote_recording = self._connect_with_retry(
-                call_audio, recorder, "call -> mixed-recorder"
-            )
-            local_recording = self._connect_with_retry(
-                tx_audio, recorder, "tx-audio -> mixed-recorder"
-            )
-            if remote_recording or local_recording:
-                self.log(f"mixed recording started: {self.mixed_recording}")
-        except Exception as exc:
-            self.log(f"mixed recorder setup failed (call continues): {exc}", "ERROR")
+        if self.mixed_recording:
+            try:
+                recorder = pj.AudioMediaRecorder()
+                with MEDIA_GRAPH_LOCK:
+                    recorder.createRecorder(self.mixed_recording)
+                self.mixed_recorder = recorder
+                remote_recording = self._connect_with_retry(
+                    call_audio, recorder, "call -> mixed-recorder"
+                )
+                local_recording = self._connect_with_retry(
+                    tx_audio, recorder, "tx-audio -> mixed-recorder"
+                )
+                if remote_recording or local_recording:
+                    self.log(f"mixed recording started: {self.mixed_recording}")
+            except Exception as exc:
+                self.log(
+                    f"mixed recorder setup failed (call continues): {exc}",
+                    "ERROR",
+                )
 
         self.media_graph_ready = True
         self.log("permanent media graph is ready")
@@ -537,7 +541,10 @@ class MyCall(pj.Call):
                 f"silent_for_ms={silent_for_ms:.0f}"
             )
         else:
-            self.log(f"remote turn finished ({label}) voiced_ms={voiced_ms}")
+            self.log(
+                f"remote turn finished ({label}) voiced_ms={voiced_ms} "
+                f"silent_for_ms={silent_for_ms:.0f}"
+            )
         return True
 
     def _wait_for_turn(

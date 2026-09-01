@@ -19,6 +19,7 @@ from config import (
     CALL_START_GAP_MS,
     DEST_URI,
     DTMF_METHOD,
+    ENABLE_CALL_RECORDING,
     MAX_CALL_SECONDS,
     NUM_CALLS,
     PY_GIL_SWITCH_INTERVAL,
@@ -101,7 +102,11 @@ def main():
                 call_id=call_id,
                 dst_uri=DEST_URI,
                 actions=ACTIONS,
-                mixed_recording=build_recording_path("mixed", call_id),
+                mixed_recording=(
+                    build_recording_path("mixed", call_id)
+                    if ENABLE_CALL_RECORDING
+                    else None
+                ),
                 audio_assets=audio_assets,
                 ami_ready_events=ami_ready_events,
             )

@@ -122,6 +122,7 @@ AMI_TRANSFER_DIAL_TARGET_LIST = tuple(
 # Test actions and files
 INPUT_AUDIO_DIR = Path(os.getenv("INPUT_AUDIO_DIR", "input_audios"))
 CALLS_OUTPUT_DIR = os.getenv("CALLS_OUTPUT_DIR", "call_recordings")
+ENABLE_CALL_RECORDING = env_bool("ENABLE_CALL_RECORDING", False)
 
 ACTIONS = [
     ("wav", "name2.wav"),

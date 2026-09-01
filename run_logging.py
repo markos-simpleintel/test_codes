@@ -19,7 +19,8 @@ _print_lock = threading.Lock()
 def log_message(message: str, level: str = "INFO"):
     if LOG_LEVELS.get(level, LOG_LEVELS["INFO"]) <= ACTIVE_LOG_LEVEL:
         with _print_lock:
-            print(message, flush=True)
+            timestamp = _dt.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            print(f"{timestamp} {message}", flush=True)
 
 
 def log_info(message: str):
